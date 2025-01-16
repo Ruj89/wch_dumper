@@ -16,6 +16,6 @@ fn main() -> ! {
 
     loop {
         led.toggle();
-        delay.delay_ms(1000);
+        delay.delay_ms(125);
     }
 }
