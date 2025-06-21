@@ -1,3 +1,9 @@
+## Build
+
+```bash
+cargo build
+```
+
 In order to flash the device, execute the following command
 
 ```bash
