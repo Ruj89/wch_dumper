@@ -9,11 +9,6 @@ use embassy_executor::Spawner;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, RequestType};
 use embassy_usb::{Builder, Handler};
 
-
-mod mtp_handler;
-use mtp_handler::consts::{MtpRequest};
-use mtp_handler::lib::{UsbMtpDevice};
-
 bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
