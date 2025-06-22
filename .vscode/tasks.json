@@ -1,0 +1,53 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cargo",
+			"command": "build",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"label": "build"
+		},
+		{
+			"type": "shell",
+			"command": "openocd",
+			"args": [
+				"-c",
+				"debug_level 2",
+				"-f",
+				"utils/wch-riscv.cfg",
+				"-c",
+				"init",
+				"-c",
+				"halt",
+				"-c",
+				"program {${workspaceFolder}/target/riscv32imfc-unknown-none-elf/debug/dumper} verify reset",
+				"-c",
+				"shutdown"
+			],
+      		"problemMatcher": [],
+			"label": "flash"
+		},
+		{
+			"type": "shell",
+			"command": "openocd",
+			"args": [
+				"-c",
+				"debug_level 2",
+				"-f",
+				"utils/wch-riscv.cfg",
+				"-c",
+				"init",
+				"-c",
+				"halt"
+			],
+      		"problemMatcher": [],
+			"label": "launch remote debugger"
+		}
+	]
+}
