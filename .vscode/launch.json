@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug on target",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/riscv32imfc-unknown-none-elf/debug/dumper",
+      "miDebuggerPath": "riscv32-unknown-elf-gdb",
+      "miDebuggerServerAddress": "localhost:3333",
+      "cwd": "${workspaceFolder}",
+      "externalConsole": false,
+      "MIMode": "gdb",
+    }
+  ]
+}
