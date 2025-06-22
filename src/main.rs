@@ -8,37 +8,18 @@ use ch32_hal::{self as hal, bind_interrupts, peripherals, Config};
 use embassy_executor::Spawner;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, RequestType};
 use embassy_usb::{Builder, Handler};
-use usb_dfu_target::consts::{DfuAttributes, DfuRequest};
-use usb_dfu_target::{DfuHandler, UsbDfuDevice};
+
+
+mod mtp_handler;
+use mtp_handler::consts::{MtpRequest};
+use mtp_handler::lib::{UsbMtpDevice};
 
 bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
 
-const BLOCK_SIZE: usize = 64;
-
-struct DfuDemoDevice;
-
-impl DfuHandler for DfuDemoDevice {
-    fn write_data(&mut self, offset: usize, data: &[u8]) {
-        // Nothing
-    }
-
-    fn complete_download(&mut self) {
-        // TODO: nothing
-    }
-
-    fn upload(&self, buffer: &mut [u8], offset: usize) -> usize {
-        todo!()
-    }
-
-    fn is_write_complete(&self) -> bool {
-        true
-    }
-}
-
 #[embassy_executor::main(entry = "qingke_rt::entry")]
-async fn main(spawner: Spawner) -> ! {
+async fn main(_spawner: Spawner) -> ! {
     // setup clocks
     let cfg = Config {
         rcc: ch32_hal::rcc::Config::SYSCLK_FREQ_144MHZ_HSI,
@@ -47,13 +28,13 @@ async fn main(spawner: Spawner) -> ! {
     let p = hal::init(cfg);
 
     /* USB DRIVER SECION */
-    let mut buffer: [EndpointDataBuffer; 1] = core::array::from_fn(|_| EndpointDataBuffer::default());
+    let mut buffer: [EndpointDataBuffer; 4] = core::array::from_fn(|_| EndpointDataBuffer::default());
     let driver = Driver::new(p.OTG_FS, p.PA12, p.PA11, &mut buffer);
 
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0x6666, 0xcafe);
     config.manufacturer = Some("Embassy");
-    config.product = Some("USB DFU Demo");
+    config.product = Some("USB MTP Demo");
     config.serial_number = Some("12345678");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
@@ -73,9 +54,8 @@ async fn main(spawner: Spawner) -> ! {
     let mut msos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
 
-    let mut dfu_device_handler = DfuDemoDevice;
-    let mut request_handler = DfuRequestHandler {
-        inner: UsbDfuDevice::new(&mut dfu_device_handler),
+    let mut request_handler = MtpRequestHandler {
+        inner: UsbMtpDevice::new(),
     };
 
     let mut builder = Builder::new(
@@ -90,23 +70,12 @@ async fn main(spawner: Spawner) -> ! {
     let mut func = builder.function(0x00, 0x00, 0x00);
     let mut iface = func.interface();
     let mut alt = {
-        use usb_dfu_target::consts::*;
-        iface.alt_setting(USB_CLASS_APPN_SPEC, APPN_SPEC_SUBCLASS_DFU, DFU_PROTOCOL_DFU, None)
+        use mtp_handler::consts::*;
+        iface.alt_setting(USB_CLASS_APPN_SPEC, APPN_SPEC_SUBCLASS_MTP, MTP_PROTOCOL_MTP, None)
     };
-    let mut attr = DfuAttributes::empty();
-    attr.set(DfuAttributes::CAN_DOWNLOAD, true);
-    alt.descriptor(
-        usb_dfu_target::consts::DESC_DFU_FUNCTIONAL,
-        &[
-            attr.bits(),
-            0xc4,
-            0x09, // 2500ms timeout, doesn't affect operation as DETACH not necessary in bootloader code
-            (BLOCK_SIZE & 0xff) as u8,
-            ((BLOCK_SIZE & 0xff00) >> 8) as u8,
-            0x10,
-            0x01, // DFU 1.1
-        ],
-    );
+    alt.endpoint_bulk_in(64);
+    alt.endpoint_bulk_out(64);
+    alt.endpoint_interrupt_in(64, 6);
 
     drop(func);
     builder.handler(&mut request_handler);
@@ -123,23 +92,13 @@ async fn main(spawner: Spawner) -> ! {
     /* END USB DRIVER */
 }
 
-struct DfuRequestHandler<'h> {
-    inner: UsbDfuDevice<'h>,
+struct MtpRequestHandler {
+    inner: UsbMtpDevice,
 }
 
-impl<'h> Handler for DfuRequestHandler<'h> {
-    fn control_out(&mut self, req: embassy_usb::control::Request, buf: &[u8]) -> Option<OutResponse> {
-        if (req.request_type, req.recipient) != (RequestType::Class, Recipient::Interface) {
-            return None;
-        }
-
-        match DfuRequest::try_from(req.request) {
-            Ok(req) => match self.inner.handle_control_out(req, buf) {
-                Ok(_) => Some(OutResponse::Accepted),
-                Err(_) => Some(OutResponse::Rejected),
-            },
-            Err(_) => Some(OutResponse::Rejected),
-        }
+impl<'h> Handler for MtpRequestHandler {
+    fn control_out(&mut self, _: embassy_usb::control::Request, _: &[u8]) -> Option<OutResponse> {
+        return None;
     }
 
     fn control_in<'a>(
@@ -147,15 +106,15 @@ impl<'h> Handler for DfuRequestHandler<'h> {
         req: embassy_usb::control::Request,
         buf: &'a mut [u8],
     ) -> Option<embassy_usb::control::InResponse<'a>> {
-        if (req.request_type, req.recipient) != (RequestType::Class, Recipient::Interface) {
-            return None;
-        }
-        match DfuRequest::try_from(req.request) {
-            Ok(req) => match self.inner.handle_control_in(req, buf) {
-                Ok(buf) => Some(InResponse::Accepted(buf)),
+        if (req.request_type, req.recipient) == (RequestType::Class, Recipient::Endpoint) {
+            return match MtpRequest::try_from(req.request) {
+                Ok(req) => match self.inner.handle_mtp_in(req, buf) {
+                    Ok(buf) => Some(InResponse::Accepted(buf)),
+                    Err(_) => Some(InResponse::Rejected),
+                },
                 Err(_) => Some(InResponse::Rejected),
-            },
-            Err(_) => Some(InResponse::Rejected),
+            }
         }
+        return None;
     }
 }

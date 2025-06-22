@@ -40,9 +40,9 @@ checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
 
 [[package]]
 name = "bitflags"
-version = "2.7.0"
+version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1be3f42a67d6d345ecd59f675f3f012d6974981560836e938c22b424b85ce1be"
+checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 
 [[package]]
 name = "byte-slice-cast"
@@ -180,11 +180,13 @@ dependencies = [
 name = "dumper"
 version = "0.0.0"
 dependencies = [
+ "bitflags",
  "ch32-hal",
  "critical-section",
  "display-interface-spi",
  "edrv-bmp180",
  "embassy-executor",
+ "embassy-futures",
  "embassy-time",
  "embassy-usb",
  "embedded-graphics",
@@ -194,7 +196,6 @@ dependencies = [
  "qingke",
  "qingke-rt",
  "ssd1306",
- "usb-dfu-target",
 ]
 
 [[package]]
@@ -314,9 +315,9 @@ checksum = "f1177859559ebf42cd24ae7ba8fe6ee707489b01d0bf471f8827b7b12dcb0bc0"
 
 [[package]]
 name = "embassy-usb"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d0b882133fa684b9d4652351cd7aac5afe8a2c2bf4a7da59f442ff61087cda2"
+checksum = "6e651b9b7b47b514e6e6d1940a6e2e300891a2c33641917130643602a0cb6386"
 dependencies = [
  "embassy-futures",
  "embassy-net-driver-channel",
@@ -908,15 +909,6 @@ checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
 dependencies = [
  "heapless",
  "portable-atomic",
-]
-
-[[package]]
-name = "usb-dfu-target"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "208557ef21c11ae15376442f6cef4167d6c9292fafa778d114e0c43d1c3b10d0"
-dependencies = [
- "bitflags",
 ]
 
 [[package]]
