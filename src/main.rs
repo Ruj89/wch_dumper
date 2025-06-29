@@ -5,16 +5,23 @@ use panic_halt as _;
 use ch32_hal::usb::EndpointDataBuffer;
 use ch32_hal::otg_fs::{self, Driver};
 use ch32_hal::{self as hal, bind_interrupts, peripherals, Config};
-use embassy_executor::Spawner;
-use embassy_usb::control::{InResponse, OutResponse, Recipient, RequestType};
-use embassy_usb::{Builder, Handler};
+use ch32_hal::peripherals::OTG_FS;
+use embassy_executor::{task, Spawner};
+use embassy_usb::{Builder, UsbDevice};
+use embassy_time::Timer;
+
+mod usb;
+
+use crate::usb::mtp::MtpClass;
 
 bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
+static mut EP_BUFFERS: MaybeUninit<[EndpointDataBuffer; EP_COUNT]> = MaybeUninit::uninit();
+
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
-async fn main(_spawner: Spawner) -> ! {
+async fn main(spawner: Spawner) -> ! {
     // setup clocks
     let cfg = Config {
         rcc: ch32_hal::rcc::Config::SYSCLK_FREQ_144MHZ_HSI,
@@ -22,8 +29,14 @@ async fn main(_spawner: Spawner) -> ! {
     };
     let p = hal::init(cfg);
 
-    /* USB DRIVER SECION */
-    let mut buffer: [EndpointDataBuffer; 4] = core::array::from_fn(|_| EndpointDataBuffer::default());
+    /* USB DRIVER SECION */    
+    let buffer = unsafe {
+        // Safety:
+        // 1. Siamo in `main`, quindi viene eseguito una sola volta.
+        // 2. Dopo questa chiamata passeremo l’unico &mut a `Driver::new`,
+        //    che lo userà per tutta la durata del programma: nessun alias.
+        EP_BUFFERS.write(core::array::from_fn(|_| EndpointDataBuffer::default()))
+    };
     let driver = Driver::new(p.OTG_FS, p.PA12, p.PA11, &mut buffer);
 
     // Create embassy-usb Config
@@ -48,11 +61,7 @@ async fn main(_spawner: Spawner) -> ! {
     // You can also add a Microsoft OS descriptor.
     let mut msos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
-
-    let mut request_handler = MtpRequestHandler {
-        inner: UsbMtpDevice::new(),
-    };
-
+    
     let mut builder = Builder::new(
         driver,
         config,
@@ -62,54 +71,54 @@ async fn main(_spawner: Spawner) -> ! {
         &mut control_buf,
     );
 
-    let mut func = builder.function(0x00, 0x00, 0x00);
-    let mut iface = func.interface();
-    let mut alt = {
-        use mtp_handler::consts::*;
-        iface.alt_setting(USB_CLASS_APPN_SPEC, APPN_SPEC_SUBCLASS_MTP, MTP_PROTOCOL_MTP, None)
-    };
-    alt.endpoint_bulk_in(64);
-    alt.endpoint_bulk_out(64);
-    alt.endpoint_interrupt_in(64, 6);
+    // The maximum packet size MUST be 8/16/32/64 on full‑speed.
+    const MAX_PACKET_SIZE: u16 = 64;
+    let mtp_class = MtpClass::new(&mut builder, MAX_PACKET_SIZE);
 
-    drop(func);
-    builder.handler(&mut request_handler);
+    // Build the final `UsbDevice` which owns the internal state.
+    let usb_device = builder.build();
 
-    // Build the builder.
-    let mut usb = builder.build();
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Spawn async tasks
+    // ──────────────────────────────────────────────────────────────────────────────
+    spawner.spawn(usb_device_task(usb_device)).unwrap();
+    spawner.spawn(mtp_echo_task(mtp_class)).unwrap();
 
-    // Run the USB device.
-    let usb_fut = usb.run();
-
-    // Run everything concurrently.
-    // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    usb_fut.await;
-    /* END USB DRIVER */
-}
-
-struct MtpRequestHandler {
-    inner: UsbMtpDevice,
-}
-
-impl<'h> Handler for MtpRequestHandler {
-    fn control_out(&mut self, _: embassy_usb::control::Request, _: &[u8]) -> Option<OutResponse> {
-        return None;
+    // The main task can now sleep forever; all work happens in the spawned tasks.
+    loop {
+        core::future::pending::<()>().await;
     }
+}
 
-    fn control_in<'a>(
-        &'a mut self,
-        req: embassy_usb::control::Request,
-        buf: &'a mut [u8],
-    ) -> Option<embassy_usb::control::InResponse<'a>> {
-        if (req.request_type, req.recipient) == (RequestType::Class, Recipient::Endpoint) {
-            return match MtpRequest::try_from(req.request) {
-                Ok(req) => match self.inner.handle_mtp_in(req, buf) {
-                    Ok(buf) => Some(InResponse::Accepted(buf)),
-                    Err(_) => Some(InResponse::Rejected),
-                },
-                Err(_) => Some(InResponse::Rejected),
+/// Task that drives the USB device state machine.
+#[task]
+async fn usb_device_task(mut device: UsbDevice<'static, Driver<'static, OTG_FS, 4>>) {
+    device.run().await;
+}
+
+/// Very small demo: wait for the host to open the interface and then echo what we
+/// receive back to the host.
+#[task]
+async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, 4>>) {
+    // Block until the host has configured the interface.
+    mtp.wait_connection().await;
+
+    // Send a greeting so that the host sees *something* on connect.
+    let _ = mtp.write_packet(b"Hello from Rust MTP!\r\n").await;
+
+    let mut buf = [0u8; 64];
+    loop {
+        // Read one USB bulk packet from the host.
+        match mtp.read_packet(&mut buf).await {
+            Ok(n) if n > 0 => {
+                // Echo the data back.
+                let _ = mtp.write_packet(&buf[..n]).await;
+            }
+            _ => {
+                // Allow the USB stack some breathing room; not strictly required
+                // but avoids busy‑looping if the host stalls communication.
+                Timer::after_millis(1).await;
             }
         }
-        return None;
     }
 }

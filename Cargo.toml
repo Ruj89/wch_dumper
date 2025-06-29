@@ -41,6 +41,7 @@ embedded-hal = "1.0.0"
 # for usbfs_dfu
 bitflags = "2.6.0"
 embassy-futures = "0.1.1"
+embedded-io-async = "0.6.1"
 
 [profile.release]
 strip = false   # symbols are not flashed to the microcontroller, so don't strip them.
