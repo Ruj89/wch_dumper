@@ -2,6 +2,7 @@
 #![no_main]
 
 use panic_halt as _;
+use core::{cell::UnsafeCell, mem::MaybeUninit};
 use ch32_hal::usb::EndpointDataBuffer;
 use ch32_hal::otg_fs::{self, Driver};
 use ch32_hal::{self as hal, bind_interrupts, peripherals, Config};
@@ -14,11 +15,36 @@ mod usb;
 
 use crate::usb::mtp::MtpClass;
 
+const ENDPOINT_COUNT: usize = 4;
+
 bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
-static mut EP_BUFFERS: MaybeUninit<[EndpointDataBuffer; EP_COUNT]> = MaybeUninit::uninit();
 
+// ────────────────────────────────────────────────────────────────────────────────
+// Wrapper generico: contiene un UnsafeCell ma lo dichiara Sync
+// ────────────────────────────────────────────────────────────────────────────────
+#[repr(transparent)]
+pub struct StaticCell<T>(UnsafeCell<T>);
+
+unsafe impl<T> Sync for StaticCell<T> {}
+
+impl<T> StaticCell<MaybeUninit<T>> {
+    pub unsafe fn init(&self, val: T) -> &'static mut T {
+        let ptr = self.0.get();
+        if (*ptr).as_ptr().is_null() {
+            (*ptr).write(val);
+        }
+        &mut *(*ptr).assume_init_mut()
+    }
+}
+
+static EP_BUFFERS: StaticCell<MaybeUninit<[EndpointDataBuffer; ENDPOINT_COUNT]>> =
+    StaticCell(UnsafeCell::new(MaybeUninit::uninit()));
+static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
+static BOS_DESCRIPTOR   : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
+static MSOS_DESCRIPTOR  : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
+static CONTROL_BUF      : StaticCell<[u8;  64]> = StaticCell(UnsafeCell::new([0;  64]));
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
@@ -29,15 +55,10 @@ async fn main(spawner: Spawner) -> ! {
     };
     let p = hal::init(cfg);
 
-    /* USB DRIVER SECION */    
     let buffer = unsafe {
-        // Safety:
-        // 1. Siamo in `main`, quindi viene eseguito una sola volta.
-        // 2. Dopo questa chiamata passeremo l’unico &mut a `Driver::new`,
-        //    che lo userà per tutta la durata del programma: nessun alias.
-        EP_BUFFERS.write(core::array::from_fn(|_| EndpointDataBuffer::default()))
+        EP_BUFFERS.init(core::array::from_fn(|_| EndpointDataBuffer::default()))
     };
-    let driver = Driver::new(p.OTG_FS, p.PA12, p.PA11, &mut buffer);
+    let driver = Driver::new(p.OTG_FS, p.PA12, p.PA11, buffer);
 
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0x6666, 0xcafe);
@@ -53,22 +74,14 @@ async fn main(spawner: Spawner) -> ! {
     config.device_sub_class = 0x00;
     config.device_protocol = 0x00;
     config.composite_with_iads = false;
-
-    // Create embassy-usb DeviceBuilder using the driver and config.
-    // It needs some buffers for building the descriptors.
-    let mut config_descriptor = [0; 256];
-    let mut bos_descriptor = [0; 256];
-    // You can also add a Microsoft OS descriptor.
-    let mut msos_descriptor = [0; 256];
-    let mut control_buf = [0; 64];
     
     let mut builder = Builder::new(
         driver,
         config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut msos_descriptor,
-        &mut control_buf,
+        unsafe { &mut *CONFIG_DESCRIPTOR.0.get() },
+        unsafe { &mut *BOS_DESCRIPTOR   .0.get() },
+        unsafe { &mut *MSOS_DESCRIPTOR  .0.get() },
+        unsafe { &mut *CONTROL_BUF      .0.get() },
     );
 
     // The maximum packet size MUST be 8/16/32/64 on full‑speed.
@@ -92,14 +105,14 @@ async fn main(spawner: Spawner) -> ! {
 
 /// Task that drives the USB device state machine.
 #[task]
-async fn usb_device_task(mut device: UsbDevice<'static, Driver<'static, OTG_FS, 4>>) {
+async fn usb_device_task(mut device: UsbDevice<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>) {
     device.run().await;
 }
 
 /// Very small demo: wait for the host to open the interface and then echo what we
 /// receive back to the host.
 #[task]
-async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, 4>>) {
+async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>) {
     // Block until the host has configured the interface.
     mtp.wait_connection().await;
 
