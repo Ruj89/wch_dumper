@@ -1,7 +1,6 @@
-//! CDC-ACM class implementation, aka Serial over USB.
+//! MTP class implementation.
 
 use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
-use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder};
 
 /// This should be used as `device_class` when building the `UsbDevice`.
@@ -21,7 +20,21 @@ const REQ_SET_LINE_CODING: u8 = 0x20;
 const REQ_GET_LINE_CODING: u8 = 0x21;
 const REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 
-/// Packet level implementation of a CDC-ACM serial port.
+#[derive(Debug)]
+pub struct PtpCommand {
+    pub op_code: u16,
+    pub transaction_id: u32,
+    //pub session_id: u32,
+}
+
+/// Errors returned by [`MtpClass::parse_mtp_command`]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum MtpError {
+    CannotParseHeader,
+}
+
+/// Packet level implementation of a MTP serial port.
 ///
 /// This class can be used directly and it has the least overhead due to directly reading and
 /// writing USB packets with no intermediate buffers, but it will not act like a stream-like serial
@@ -35,7 +48,6 @@ const REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 ///   terminated with a short packet, even if the bulk endpoint is used for stream-like data.
 pub struct MtpClass<'d, D: Driver<'d>> {
     _comm_ep: D::EndpointIn,
-    _data_if: InterfaceNumber,
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
 }
@@ -48,7 +60,6 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
         let mut func = builder.function(0x00, 0x00, 0x00);
         let mut iface = func.interface();
-        let data_if = iface.interface_number();
         let mut alt = iface.alt_setting(USB_CLASS_MTP, MTP_SUBCLASS, MTP_PROTOCOL, None);
         let read_ep = alt.endpoint_bulk_out(max_packet_size);
         let write_ep = alt.endpoint_bulk_in(max_packet_size);
@@ -58,7 +69,6 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
         MtpClass {
             _comm_ep: comm_ep,
-            _data_if: data_if,
             read_ep,
             write_ep,
         }
@@ -72,7 +82,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
     /// Writes a single packet into the IN endpoint.
     pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
-        self.write_ep.write(data).await
+        let len = core::cmp::min(data.len(), self.max_packet_size() as usize);
+        self.write_ep.write(&data[..len]).await
     }
 
     /// Reads a single packet from the OUT endpoint.
@@ -83,6 +94,103 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     /// Waits for the USB host to enable this interface
     pub async fn wait_connection(&mut self) {
         self.read_ep.wait_enabled().await;
+    }
+
+    pub fn parse_mtp_command(&self, buf: &[u8]) -> Result<PtpCommand, MtpError> {
+        let length = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if length < 12 {
+            return Err(MtpError::CannotParseHeader);
+        }
+        let packet_type = u16::from_le_bytes([buf[4], buf[5]]);
+        let op_code = u16::from_le_bytes([buf[6], buf[7]]);
+        let transaction_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        //let session_id = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+
+        /*if length != 16 || packet_type != 0x0001 || op_code != 0x1002 {
+            return None;
+        }*/
+
+        Ok(PtpCommand {
+            op_code,
+            transaction_id,
+            //session_id,
+        })
+    }
+
+    // Helper: write little-endian u16
+    fn write_u16(buf: &mut [u8], offset: &mut usize, val: u16) {
+        buf[*offset..*offset + 2].copy_from_slice(&val.to_le_bytes());
+        *offset += 2;
+    }
+
+    // Helper: write little-endian u32
+    fn write_u32(buf: &mut [u8], offset: &mut usize, val: u32) {
+        buf[*offset..*offset + 4].copy_from_slice(&val.to_le_bytes());
+        *offset += 4;
+    }
+
+    // PTP string format: len (u8), UTF-16LE chars, 0x0000 terminator
+    fn write_ptp_string(buf: &mut [u8], mut offset: usize, s: &str) -> usize {
+        let mut len = 1;
+        let start = offset;
+
+        buf[offset] = (s.len() + 1) as u8; // total chars incl. null
+        offset += 1;
+
+        for c in s.encode_utf16() {
+            let b = c.to_le_bytes();
+            buf[offset] = b[0];
+            buf[offset + 1] = b[1];
+            offset += 2;
+            len += 1;
+        }
+
+        // null terminator UTF-16
+        buf[offset] = 0;
+        buf[offset + 1] = 0;
+        len += 1;
+
+        offset + 2 - start
+    }
+
+    pub fn generate_open_session_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+        let length = 12u32.to_le_bytes();
+        let packet_type = 0x0003u16.to_le_bytes();       // Response Block
+        let response_code = 0x2001u16.to_le_bytes();     // OK
+        let tx_id = transaction_id.to_le_bytes();
+
+        buffer[0..4].copy_from_slice(&length);
+        buffer[4..6].copy_from_slice(&packet_type);
+        buffer[6..8].copy_from_slice(&response_code);
+        buffer[8..12].copy_from_slice(&tx_id);
+
+        12
+    }
+
+    pub fn generate_device_info_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+        let mut offset = 12;
+        Self::write_u16(buffer, &mut offset, 0x0100); // StandardVersion
+        Self::write_u32(buffer, &mut offset, 6); // VendorExtensionID = 6 (Microsoft)
+        Self::write_u16(buffer, &mut offset, 100);  // VendorExtensionVersion
+        offset += Self::write_ptp_string(buffer, offset, "microsoft.com: 1.0;"); // VendorExtensionDesc
+        Self::write_u16(buffer, &mut offset, 0); // FunctionalMode
+        Self::write_u32(buffer, &mut offset, 1); // NumOperationsSupported
+        Self::write_u16(buffer, &mut offset, 0x1001); // GetDeviceInfo
+        Self::write_u32(buffer, &mut offset, 0); // EventsSupported = empty
+        Self::write_u32(buffer, &mut offset, 0); // DevicePropertiesSupported = empty
+        Self::write_u32(buffer, &mut offset, 0); // CaptureFormats = empty
+        Self::write_u32(buffer, &mut offset, 0); // PlaybackFormats = empty
+        offset += Self::write_ptp_string(buffer, offset, "MyCompany"); // Manufacturer
+        offset += Self::write_ptp_string(buffer, offset, "MTP Device"); // Model
+        offset += Self::write_ptp_string(buffer, offset, "1.0"); // DeviceVersion
+        offset += Self::write_ptp_string(buffer, offset, "12345678"); // SerialNumber
+        let total_len = offset as u32;
+        Self::write_u32(buffer, &mut 0, total_len);
+        Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data
+        Self::write_u16(buffer, &mut 6, 0x1001);    // Operation: GetDeviceInfo
+        Self::write_u32(buffer, &mut 8, transaction_id);
+
+        offset
     }
 
     /// Split the class into a sender and receiver.
@@ -100,7 +208,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 }
 
-/// CDC ACM class packet sender.
+/// MTP class packet sender.
 ///
 /// You can obtain a `Sender` with [`MtpClass::split`]
 pub struct Sender<'d, D: Driver<'d>> {
@@ -125,7 +233,7 @@ impl<'d, D: Driver<'d>> Sender<'d, D> {
     }
 }
 
-/// CDC ACM class packet receiver.
+/// MTP class packet receiver.
 ///
 /// You can obtain a `Receiver` with [`MtpClass::split`]
 pub struct Receiver<'d, D: Driver<'d>> {
