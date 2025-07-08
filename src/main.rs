@@ -17,7 +17,7 @@ use crate::usb::mtp::MtpClass;
 
 const ENDPOINT_COUNT: usize = 4;
 
-bind_interrupts!(struct Irq {
+bind_interrupts!(struct Irq { 
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
 
@@ -32,10 +32,12 @@ unsafe impl<T> Sync for StaticCell<T> {}
 impl<T> StaticCell<MaybeUninit<T>> {
     pub unsafe fn init(&self, val: T) -> &'static mut T {
         let ptr = self.0.get();
-        if (*ptr).as_ptr().is_null() {
-            (*ptr).write(val);
+        unsafe {
+            if (*ptr).as_ptr().is_null() {
+                (*ptr).write(val);
+            }
+            &mut *(*ptr).assume_init_mut()
         }
-        &mut *(*ptr).assume_init_mut()
     }
 }
 
@@ -116,16 +118,37 @@ async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOI
     // Block until the host has configured the interface.
     mtp.wait_connection().await;
 
-    // Send a greeting so that the host sees *something* on connect.
-    let _ = mtp.write_packet(b"Hello from Rust MTP!\r\n").await;
-
     let mut buf = [0u8; 64];
     loop {
         // Read one USB bulk packet from the host.
         match mtp.read_packet(&mut buf).await {
             Ok(n) if n > 0 => {
-                // Echo the data back.
-                let _ = mtp.write_packet(&buf[..n]).await;
+                if let Some(cmd) = mtp.parse_mtp_command(&buf) {
+                    let len;
+                    //match cmd.op_code {
+                    //    0x1001 => {
+                    //        len = mtp.generate_device_info_response(cmd.transaction_id, &mut buf);
+                    //    }
+                    //    0x1002 => {
+                            len = mtp.generate_open_session_response(cmd.transaction_id, &mut buf);
+                    //    }
+                    //    _ => {
+                    //        len = 0;
+                    //    }
+                    //}
+                    if len > 0 {
+                        match mtp.write_packet(&buf[..len]).await {
+                            Ok(_) => {
+                                Timer::after_millis(1).await;
+                            }
+                            _ => {
+                                // Allow the USB stack some breathing room; not strictly required
+                                // but avoids busy‑looping if the host stalls communication.
+                                Timer::after_millis(1).await;
+                            }
+                        }
+                    }
+                }
             }
             _ => {
                 // Allow the USB stack some breathing room; not strictly required
