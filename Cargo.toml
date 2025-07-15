@@ -12,15 +12,14 @@ ch32-hal = { path = "/opt/ch32-data/build/ch32-hal", features = [
     "highcode",
     "time-driver-tim1",
 ] }
-embassy-executor = { version = "0.6.0", features = [
-    "integrated-timers",
+embassy-executor = { version = "0.7.0", features = [
     "arch-spin",
     "executor-thread",
 ] }
 
 critical-section = "1.2.0"
 
-embassy-time = "0.3.2"
+embassy-time = "0.4.0"
 embassy-usb = "0.4.0"
 nb = "1.1.0"
 
@@ -37,11 +36,6 @@ ssd1306 = "0.9"
 
 edrv-bmp180 = "0.0.1"
 embedded-hal = "1.0.0"
-
-# for usbfs_dfu
-bitflags = "2.6.0"
-embassy-futures = "0.1.1"
-embedded-io-async = "0.6.1"
 
 [profile.release]
 strip = false   # symbols are not flashed to the microcontroller, so don't strip them.

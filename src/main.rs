@@ -15,7 +15,7 @@ mod usb;
 
 use crate::usb::mtp::{MtpClass, PtpCommand};
 
-const ENDPOINT_COUNT: usize = 4;
+const ENDPOINT_COUNT: usize = 14;
 
 bind_interrupts!(struct Irq { 
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
@@ -76,7 +76,7 @@ async fn main(spawner: Spawner) -> ! {
     config.device_sub_class = 0x00;
     config.device_protocol = 0x00;
     config.composite_with_iads = false;
-    
+
     let mut builder = Builder::new(
         driver,
         config,
@@ -96,8 +96,8 @@ async fn main(spawner: Spawner) -> ! {
     // ──────────────────────────────────────────────────────────────────────────────
     // Spawn async tasks
     // ──────────────────────────────────────────────────────────────────────────────
-    spawner.spawn(usb_device_task(usb_device)).unwrap();
     spawner.spawn(mtp_echo_task(mtp_class)).unwrap();
+    spawner.spawn(usb_device_task(usb_device)).unwrap();
 
     // The main task can now sleep forever; all work happens in the spawned tasks.
     loop {
@@ -124,30 +124,8 @@ async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOI
         match mtp.read_packet(&mut buf).await {
             Ok(n) if n > 0 => {
                 match mtp.parse_mtp_command(&buf) {
-                    Ok(cmd) => {let len;
-                        //match cmd.op_code {
-                        //    0x1001 => {
-                        //        len = mtp.generate_device_info_response(cmd.transaction_id, &mut buf);
-                        //    }
-                        //    0x1002 => {
-                                len = mtp.generate_open_session_response(cmd.transaction_id, &mut buf);
-                        //    }
-                        //    _ => {
-                        //        len = 0;
-                        //    }
-                        //}
-                        if len > 0 {
-                            match mtp.write_packet(&buf[..len]).await {
-                                Ok(_) => {
-                                    Timer::after_millis(1).await;
-                                }
-                                _ => {
-                                    // Allow the USB stack some breathing room; not strictly required
-                                    // but avoids busy‑looping if the host stalls communication.
-                                    Timer::after_millis(1).await;
-                                }
-                            }
-                        }
+                    Ok(cmd) => {
+                        handle_response(&mut mtp, cmd).await;
                     }    
                     _ => {
                         // TODO: Handle error
@@ -160,5 +138,114 @@ async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOI
                 Timer::after_millis(1).await;
             }
         }
+    }
+}
+
+async fn handle_response<'a>(mtp: &mut MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>, cmd: PtpCommand<'a>) {
+    let mut buf = [0u8; 1024];
+
+    // Data block
+    let mut len;
+    match cmd.op_code {
+        0x1001 => {
+            len = mtp.generate_device_info_response(cmd.transaction_id, &mut buf);
+        }
+        0x1004 => {
+            len = mtp.generate_storage_id_response(cmd.transaction_id, &mut buf);
+        }
+        0x1005 => {
+            len = mtp.generate_storage_info_response(cmd.transaction_id, &mut buf, &cmd);
+        }
+        0x1007 => {
+            len = mtp.generate_object_handles_response(cmd.transaction_id, &mut buf, &cmd);
+        }
+        0x1008 => {
+            len = mtp.generate_object_info_response(cmd.transaction_id, &mut buf, &cmd);
+        }
+        0x1009 => {
+            len = mtp.generate_object_response(cmd.transaction_id, &mut buf, &cmd);
+        }
+        _ => {
+            len = 0;
+        }
+    }
+    let mut offset = 0;
+    while offset < len {
+        let end = core::cmp::min(offset + mtp.max_packet_size(), len);
+        let chunk = &buf[offset..end];
+        match mtp.write_packet(&chunk).await {
+            Ok(_) => {
+                Timer::after_millis(1).await;
+            }
+            _ => {
+                // Allow the USB stack some breathing room; not strictly required
+                // but avoids busy‑looping if the host stalls communication.
+                Timer::after_millis(1).await;
+            }
+        }
+        offset = end;
+    }
+    if offset > 0 && offset % 64 == 0 {
+        match mtp.write_packet(&[]).await {
+            Ok(_) => {
+                Timer::after_millis(1).await;
+            }
+            _ => {
+                // Allow the USB stack some breathing room; not strictly required
+                // but avoids busy‑looping if the host stalls communication.
+                Timer::after_millis(1).await;
+            }
+        }
+    }
+
+    // Response block
+    match cmd.op_code {
+        0x1001 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        0x1002 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        0x1003 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        0x1004 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        0x1005 => {
+            if len == 0 {
+                len = mtp.generate_error_response_block(cmd.transaction_id, &mut buf, 0x2013);
+            } else {
+                len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+        }
+        0x1007 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        0x1008 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        0x1009 => {
+            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
+        }
+        _ => {
+            len = 0;
+        }
+    }
+    let mut offset = 0;
+    while offset < len {
+        let end = core::cmp::min(offset + mtp.max_packet_size(), len);
+        let chunk = &buf[offset..end];
+        match mtp.write_packet(&chunk).await {
+            Ok(_) => {
+                Timer::after_millis(1).await;
+            }
+            _ => {
+                // Allow the USB stack some breathing room; not strictly required
+                // but avoids busy‑looping if the host stalls communication.
+                Timer::after_millis(1).await;
+            }
+        }
+        offset = end;
     }
 }
