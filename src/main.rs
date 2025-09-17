@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use ch32_hal::gpio::{Input, Pull};
 use panic_halt as _;
 use core::{cell::UnsafeCell, mem::MaybeUninit};
 use ch32_hal::usb::EndpointDataBuffer;
@@ -10,6 +11,7 @@ use ch32_hal::peripherals::OTG_FS;
 use embassy_executor::{task, Spawner};
 use embassy_usb::{Builder, UsbDevice};
 use embassy_time::Timer;
+use hal::gpio::{Level, Output};
 
 mod usb;
 
@@ -56,6 +58,46 @@ async fn main(spawner: Spawner) -> ! {
         ..Default::default()
     };
     let p = hal::init(cfg);
+
+    let mut m2 = Output::new(p.PB12, Level::High, Default::default());
+    let mut pgr_ce = Output::new(p.PE1, Level::High, Default::default());
+    let mut chr_wr = Output::new(p.PB10, Level::High, Default::default());
+    let mut ciram_ce = Input::new(p.PE0, Pull::Up);
+    let mut chr_rd = Output::new(p.PB7, Level::High, Default::default());
+    let mut irq = Input::new(p.PE6, Pull::Up);
+    let mut prg_rw = Output::new(p.PA14, Level::High, Default::default());
+    
+    let mut a = [
+        Output::new(p.PD0, Level::Low, Default::default()),
+        Output::new(p.PC12, Level::Low, Default::default()),
+        Output::new(p.PC11, Level::Low, Default::default()),
+        Output::new(p.PC10, Level::Low, Default::default()),
+        Output::new(p.PA15, Level::Low, Default::default()),
+        Output::new(p.PE3, Level::Low, Default::default()),
+        Output::new(p.PE4, Level::Low, Default::default()),
+        Output::new(p.PB13, Level::Low, Default::default()),
+        Output::new(p.PB15, Level::Low, Default::default()),
+        Output::new(p.PD4, Level::Low, Default::default()),
+        Output::new(p.PA8, Level::Low, Default::default()),
+        Output::new(p.PD3, Level::Low, Default::default()),
+        Output::new(p.PA9, Level::Low, Default::default()),
+        Output::new(p.PD2, Level::Low, Default::default()),
+        Output::new(p.PA10, Level::Low, Default::default()),
+        Output::new(p.PB11, Level::High, Default::default()),
+    ];
+
+    let mut ciram_a10 = Input::new(p.PD6, Pull::Up);
+
+    let mut d0 = Input::new(p.PE5, Pull::Up);
+    let mut d1 = Input::new(p.PA13, Pull::Up);
+    let mut d2 = Input::new(p.PB6, Pull::Up);
+    let mut d3 = Input::new(p.PB14, Pull::Up);
+    let mut d4 = Input::new(p.PD8, Pull::Up);
+    let mut d5 = Input::new(p.PD9, Pull::Up);
+    let mut d6 = Input::new(p.PD10, Pull::Up);
+    let mut d7 = Input::new(p.PD11, Pull::Up);
+
+    set_address(&mut a, 0);
 
     let buffer = unsafe {
         EP_BUFFERS.init(core::array::from_fn(|_| EndpointDataBuffer::default()))
@@ -247,5 +289,21 @@ async fn handle_response<'a>(mtp: &mut MtpClass<'static, Driver<'static, OTG_FS,
             }
         }
         offset = end;
+    }
+}
+
+fn set_address(handler: &mut [Output<'_>; 16], address: u16) {
+    let mut values: [Level; 16] = [Level::Low; 16];
+
+    // Prepare values
+    for index in 0..handler.len() - 1 {
+        values[index] = Level::from(address & (1 << index) > 0)
+    }
+    // PPU /A13
+    values[handler.len()-1] = Level::from(address & (1 << 13) > 0);
+    
+    // Set GPIO values
+    for index in 0..handler.len() {
+        handler[index].set_level(values[index]); 
     }
 }
