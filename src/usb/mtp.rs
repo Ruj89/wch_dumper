@@ -51,14 +51,14 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     //_comm_ep: D::EndpointIn,
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
-    crc32: [u8; 512],
-    crc32_mmc3: [u8; 512],
+    crc32: &'d[u8; 512],
+    crc32_mmc3: &'d[u8; 512],
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     /// Creates a new MtpClass with the provided UsbBus and `max_packet_size` in bytes. For
     /// full-speed devices, `max_packet_size` has to be one of 8, 16, 32 or 64.
-    pub fn new(builder: &mut Builder<'d, D>, max_packet_size: u16, crc32: [u8; 512], crc32_mmc3: [u8; 512]) -> Self {
+    pub fn new(builder: &mut Builder<'d, D>, max_packet_size: u16, crc32: &'d[u8; 512], crc32_mmc3: &'d[u8; 512]) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
@@ -321,7 +321,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
         Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
         Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
-        Self::write_u32(buffer, &mut offset, 128000); // Object Compressed Size
+        Self::write_u32(buffer, &mut offset, 32);//(self.crc32.len()+self.crc32_mmc3.len()).try_into().unwrap()); // Object Compressed Size
         Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
         Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
         Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
@@ -353,9 +353,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             return 0;
         }
         let mut offset = 12;
-        Self::write_buffer(buffer, &mut offset, &self.crc32);       // File content
-        Self::write_buffer(buffer, &mut offset, &self.crc32_mmc3);  // File content
-        
+        Self::write_buffer(buffer, &mut offset, self.crc32);       // File content        
+        Self::write_buffer(buffer, &mut offset, self.crc32_mmc3);       // File content        
         let total_len = offset as u32;
         Self::write_u32(buffer, &mut 0, total_len);
         Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data

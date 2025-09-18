@@ -49,6 +49,8 @@ static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0;
 static BOS_DESCRIPTOR   : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static MSOS_DESCRIPTOR  : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static CONTROL_BUF      : StaticCell<[u8;  64]> = StaticCell(UnsafeCell::new([0;  64]));
+static CRC32            : StaticCell<[u8; 512]> = StaticCell(UnsafeCell::new([0;  512]));
+static CRC32_MMC3       : StaticCell<[u8; 512]> = StaticCell(UnsafeCell::new([0;  512]));
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
@@ -58,7 +60,7 @@ async fn main(spawner: Spawner) -> ! {
         ..Default::default()
     };
     let p = hal::init(cfg);
-
+    
     let mut m2 = Output::new(p.PB12, Level::High, Default::default());
     let mut pgr_ce = Output::new(p.PE1, Level::High, Default::default());
     let mut chr_wr = Output::new(p.PB10, Level::High, Default::default());
@@ -103,8 +105,9 @@ async fn main(spawner: Spawner) -> ! {
     }
     set_address(&mut a, 0);
     
-    let mut crc32: [u8; 512] = [0xFF; 512];
-    let mut crc32_mmc3: [u8; 512] = [0xFF; 512];
+
+    let crc32 =    unsafe { &mut *CRC32.0.get() };
+    let crc32_mmc3 =    unsafe { &mut *CRC32_MMC3.0.get() };
 
     for c in 0..512 {
         crc32[c] = read_prg_byte(u16::try_from(0x8000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
@@ -142,7 +145,11 @@ async fn main(spawner: Spawner) -> ! {
 
     // The maximum packet size MUST be 8/16/32/64 on full‑speed.
     const MAX_PACKET_SIZE: u16 = 64;
-    let mtp_class = MtpClass::new(&mut builder, MAX_PACKET_SIZE, crc32, crc32_mmc3);
+    let mtp_class = MtpClass::new(
+        &mut builder, 
+        MAX_PACKET_SIZE, 
+        unsafe { &mut *CRC32.0.get() },
+        unsafe { &mut *CRC32_MMC3.0.get() });
 
     // Build the final `UsbDevice` which owns the internal state.
     let usb_device = builder.build();
@@ -196,7 +203,7 @@ async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOI
 }
 
 async fn handle_response<'a>(mtp: &mut MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>, cmd: PtpCommand<'a>) {
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 1024+12]; //TODO: Remove when 0x1009 has been fixed
 
     // Data block
     let mut len;
