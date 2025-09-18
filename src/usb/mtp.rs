@@ -51,12 +51,14 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     //_comm_ep: D::EndpointIn,
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
+    crc32: [u8; 512],
+    crc32_mmc3: [u8; 512],
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     /// Creates a new MtpClass with the provided UsbBus and `max_packet_size` in bytes. For
     /// full-speed devices, `max_packet_size` has to be one of 8, 16, 32 or 64.
-    pub fn new(builder: &mut Builder<'d, D>, max_packet_size: u16) -> Self {
+    pub fn new(builder: &mut Builder<'d, D>, max_packet_size: u16, crc32: [u8; 512], crc32_mmc3: [u8; 512]) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
@@ -72,6 +74,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
+            crc32,
+            crc32_mmc3,
         }
     }
 
@@ -329,7 +333,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
         Self::write_u32(buffer, &mut offset, 0); // Association Description
         Self::write_u32(buffer, &mut offset, 0); // Sequence Number
-        Self::write_string(buffer, &mut offset, "file.dat"); // Filename
+        Self::write_string(buffer, &mut offset, "crc32_and_mmc3.dat"); // Filename
         Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
         Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
         Self::write_string(buffer, &mut offset, "0"); // Keywords
@@ -349,7 +353,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             return 0;
         }
         let mut offset = 12;
-        Self::write_buffer(buffer, &mut offset, b"Hello, World!"); // Date Created
+        Self::write_buffer(buffer, &mut offset, &self.crc32);       // File content
+        Self::write_buffer(buffer, &mut offset, &self.crc32_mmc3);  // File content
         
         let total_len = offset as u32;
         Self::write_u32(buffer, &mut 0, total_len);

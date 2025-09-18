@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use ch32_hal::gpio::{Input, Pull};
+use ch32_hal::gpio::{Flex, Input, Pull};
 use panic_halt as _;
 use core::{cell::UnsafeCell, mem::MaybeUninit};
 use ch32_hal::usb::EndpointDataBuffer;
@@ -88,16 +88,28 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut ciram_a10 = Input::new(p.PD6, Pull::Up);
 
-    let mut d0 = Input::new(p.PE5, Pull::Up);
-    let mut d1 = Input::new(p.PA13, Pull::Up);
-    let mut d2 = Input::new(p.PB6, Pull::Up);
-    let mut d3 = Input::new(p.PB14, Pull::Up);
-    let mut d4 = Input::new(p.PD8, Pull::Up);
-    let mut d5 = Input::new(p.PD9, Pull::Up);
-    let mut d6 = Input::new(p.PD10, Pull::Up);
-    let mut d7 = Input::new(p.PD11, Pull::Up);
-
+    let mut d = [
+        Flex::new(p.PE5),
+        Flex::new(p.PA13),
+        Flex::new(p.PB6),
+        Flex::new(p.PB14),
+        Flex::new(p.PD8),
+        Flex::new(p.PD9),
+        Flex::new(p.PD10),
+        Flex::new(p.PD11)
+    ];
+    for dpin in &mut d {
+        dpin.set_as_input(Pull::Up);
+    }
     set_address(&mut a, 0);
+    
+    let mut crc32: [u8; 512] = [0xFF; 512];
+    let mut crc32_mmc3: [u8; 512] = [0xFF; 512];
+
+    for c in 0..512 {
+        crc32[c] = read_prg_byte(u16::try_from(0x8000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
+        crc32_mmc3[c] = read_prg_byte(u16::try_from(0xE000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
+    }
 
     let buffer = unsafe {
         EP_BUFFERS.init(core::array::from_fn(|_| EndpointDataBuffer::default()))
@@ -130,7 +142,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // The maximum packet size MUST be 8/16/32/64 on full‑speed.
     const MAX_PACKET_SIZE: u16 = 64;
-    let mtp_class = MtpClass::new(&mut builder, MAX_PACKET_SIZE);
+    let mtp_class = MtpClass::new(&mut builder, MAX_PACKET_SIZE, crc32, crc32_mmc3);
 
     // Build the final `UsbDevice` which owns the internal state.
     let usb_device = builder.build();
@@ -306,4 +318,60 @@ fn set_address(handler: &mut [Output<'_>; 16], address: u16) {
     for index in 0..handler.len() {
         handler[index].set_level(values[index]); 
     }
+}
+
+fn set_read_mode(handler: &mut [Flex<'_>; 8]) {
+    for pin in handler.iter_mut() {
+        pin.set_as_input(Pull::Up);
+    }
+}
+
+fn set_write_mode(handler: &mut [Flex<'_>; 8]) {
+    for pin in handler.iter_mut() {
+        pin.set_as_output(Default::default());
+        pin.set_low();
+    }
+}
+
+fn set_prg_read(handler: &mut Output<'_>){
+    handler.set_high();
+}
+
+fn set_romsel_low(handler: &mut Output<'_>){
+    handler.set_low();
+}
+
+fn set_romsel_high(handler: &mut Output<'_>){
+    handler.set_high();
+}
+
+fn set_romsel(handler: &mut Output<'_>, address: u16) {
+  if address & 0x8000 > 0 {
+    set_romsel_low(handler);
+  } else {    
+    set_romsel_high(handler);
+  }
+}
+
+fn set_phy2_high(handler: &mut Output<'_>){
+    handler.set_high();
+}
+
+fn read_data(handler: &mut [Flex<'_>; 8]) -> u8{
+    let mut output = 0;
+    for (index, pin) in handler.iter().enumerate() {
+        output |= (pin.is_high() as u8) << index; 
+    }
+    output
+}
+
+async fn read_prg_byte(address: u16, handler: &mut (&mut [Output<'_>; 16], &mut [Flex<'_>; 8], &mut Output<'_>, &mut Output<'_>, &mut Output<'_>)) -> u8 {
+    set_read_mode(handler.1);
+    set_prg_read(handler.2);
+    set_romsel_low(handler.3);
+    set_address(handler.0, address);
+    set_phy2_high(handler.4);
+    set_romsel(handler.3, address);
+    Timer::after_micros(1).await;
+    read_data(handler.1)
 }
