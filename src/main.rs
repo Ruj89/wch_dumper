@@ -67,7 +67,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut ciram_ce = Input::new(p.PE0, Pull::Up);
     let mut chr_rd = Output::new(p.PB7, Level::High, Default::default());
     let mut irq = Input::new(p.PE6, Pull::Up);
-    let mut prg_rw = Output::new(p.PA14, Level::High, Default::default());
+    let mut prg_rw = Output::new(p.PD15, Level::High, Default::default());
     
     let mut a = [
         Output::new(p.PD0, Level::Low, Default::default()),
@@ -92,7 +92,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut d = [
         Flex::new(p.PE5),
-        Flex::new(p.PA13),
+        Flex::new(p.PD13),
         Flex::new(p.PB6),
         Flex::new(p.PB14),
         Flex::new(p.PD8),
@@ -316,10 +316,10 @@ fn set_address(handler: &mut [Output<'_>; 16], address: u16) {
 
     // Prepare values
     for index in 0..handler.len() - 1 {
-        values[index] = Level::from(address & (1 << index) > 0)
+        values[index] = Level::from((address & (1 << index)) > 0)
     }
     // PPU /A13
-    values[handler.len()-1] = Level::from(address & (1 << 13) > 0);
+    values[handler.len()-1] = Level::from((address & (1 << 13)) == 0);
     
     // Set GPIO values
     for index in 0..handler.len() {
@@ -364,18 +364,22 @@ fn set_phy2_high(handler: &mut Output<'_>){
     handler.set_high();
 }
 
+fn set_phy2_low(handler: &mut Output<'_>){
+    handler.set_low();
+}
+
 fn read_data(handler: &mut [Flex<'_>; 8]) -> u8{
-    let mut output = 0;
+    let mut data = 0;
     for (index, pin) in handler.iter().enumerate() {
-        output |= (pin.is_high() as u8) << index; 
+        data |= (pin.is_high() as u8) << index; 
     }
-    output
+    data
 }
 
 async fn read_prg_byte(address: u16, handler: &mut (&mut [Output<'_>; 16], &mut [Flex<'_>; 8], &mut Output<'_>, &mut Output<'_>, &mut Output<'_>)) -> u8 {
     set_read_mode(handler.1);
     set_prg_read(handler.2);
-    set_romsel_low(handler.3);
+    set_romsel_high(handler.3);
     set_address(handler.0, address);
     set_phy2_high(handler.4);
     set_romsel(handler.3, address);
