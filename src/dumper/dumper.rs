@@ -1,0 +1,279 @@
+use ch32_hal::{gpio::{Flex, Input, Level, Output, Pin, Pull}, Peripheral};
+use embassy_sync::channel::Channel;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_time::Timer;
+
+enum Msg {
+    Start,
+    Data([u8; 512]),
+    End,
+}
+
+static CH: Channel<CriticalSectionRawMutex, Msg, 8> = Channel::new();
+
+pub struct DumperClass<'d> {
+    m2: Output<'d>,
+    pgr_ce: Output<'d>,
+    chr_wr: Output<'d>,
+    ciram_ce: Input<'d>,
+    chr_rd: Output<'d>,
+    irq: Input<'d>,
+    prg_rw: Output<'d>,
+    a: [Output<'d>; 16],
+    ciram_a10: Input<'d>,
+    d: [Flex<'d>; 8],
+}
+
+impl<'d> DumperClass<'d>
+{
+    pub fn new(
+        m2_pin: impl Peripheral<P = impl Pin> + 'd,
+        pgr_ce_pin: impl Peripheral<P = impl Pin> + 'd,
+        chr_wr_pin: impl Peripheral<P = impl Pin> + 'd,
+        ciram_ce_pin: impl Peripheral<P = impl Pin> + 'd,
+        chr_rd_pin: impl Peripheral<P = impl Pin> + 'd,
+        irq_pin: impl Peripheral<P = impl Pin> + 'd,
+        prg_rw_pin: impl Peripheral<P = impl Pin> + 'd,
+        a_pins: (
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+        ),
+        ciram_a10_pin: impl Peripheral<P = impl Pin> + 'd,
+        d_pins: (
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+        ),
+    ) -> Self {
+        let m2 = Output::new(m2_pin, Level::High, Default::default());
+        let pgr_ce = Output::new(pgr_ce_pin, Level::High, Default::default());
+        let chr_wr = Output::new(chr_wr_pin, Level::High, Default::default());
+        let ciram_ce = Input::new(ciram_ce_pin, Pull::Up);
+        let chr_rd = Output::new(chr_rd_pin, Level::High, Default::default());
+        let irq = Input::new(irq_pin, Pull::Up);
+        let prg_rw = Output::new(prg_rw_pin, Level::High, Default::default());
+        
+        let a = [
+            Output::new(a_pins.0, Level::Low, Default::default()),
+            Output::new(a_pins.1, Level::Low, Default::default()),
+            Output::new(a_pins.2, Level::Low, Default::default()),
+            Output::new(a_pins.3, Level::Low, Default::default()),
+            Output::new(a_pins.4, Level::Low, Default::default()),
+            Output::new(a_pins.5, Level::Low, Default::default()),
+            Output::new(a_pins.6, Level::Low, Default::default()),
+            Output::new(a_pins.7, Level::Low, Default::default()),
+            Output::new(a_pins.8, Level::Low, Default::default()),
+            Output::new(a_pins.9, Level::Low, Default::default()),
+            Output::new(a_pins.10, Level::Low, Default::default()),
+            Output::new(a_pins.11, Level::Low, Default::default()),
+            Output::new(a_pins.12, Level::Low, Default::default()),
+            Output::new(a_pins.13, Level::Low, Default::default()),
+            Output::new(a_pins.14, Level::Low, Default::default()),
+            Output::new(a_pins.15, Level::High, Default::default()),
+        ];
+
+        let ciram_a10 = Input::new(ciram_a10_pin, Pull::Up);
+
+        let d = [
+            Flex::new(d_pins.0),
+            Flex::new(d_pins.1),
+            Flex::new(d_pins.2),
+            Flex::new(d_pins.3),
+            Flex::new(d_pins.4),
+            Flex::new(d_pins.5),
+            Flex::new(d_pins.6),
+            Flex::new(d_pins.7)
+        ];
+
+       return Self { 
+            m2: m2, 
+            pgr_ce: pgr_ce, 
+            chr_wr: chr_wr, 
+            ciram_ce: ciram_ce, 
+            chr_rd: chr_rd, 
+            irq: irq,
+            prg_rw:  prg_rw,
+            a: a,
+            ciram_a10: ciram_a10,
+            d: d,
+        }
+    }
+
+    fn set_address(&mut self, address: u16) {
+        let mut values: [Level; 16] = [Level::Low; 16];
+
+        // Prepare values
+        for index in 0..self.a.len() - 1 {
+            values[index] = Level::from((address & (1 << index)) > 0)
+        }
+        // PPU /A13
+        values[self.a.len()-1] = Level::from((address & (1 << 13)) == 0);
+        
+        // Set GPIO values
+        for index in 0..self.a.len() {
+            self.a[index].set_level(values[index]); 
+        }
+    }
+
+    fn set_read_mode(&mut self) {
+        for pin in self.d.iter_mut() {
+            pin.set_as_input(Pull::Up);
+        }
+    }
+
+    fn set_write_mode(&mut self) {
+        for pin in self.d.iter_mut() {
+            pin.set_as_output(Default::default());
+            pin.set_low();
+        }
+    }
+
+    fn set_prg_read(&mut self){
+        self.prg_rw.set_high();
+    }
+
+    fn set_romsel_low(&mut self){
+        self.pgr_ce.set_low();
+    }
+
+    fn set_romsel_high(&mut self){
+        self.pgr_ce.set_high();
+    }
+
+    fn set_romsel(&mut self, address: u16) {
+    if address & 0x8000 > 0 {
+        self.set_romsel_low();
+    } else {    
+        self.set_romsel_high();
+    }
+    }
+
+    fn set_phy2_high(&mut self){
+        self.m2.set_high();
+    }
+
+    fn set_phy2_low(&mut self){
+        self.m2.set_low();
+    }
+
+    fn read_data(&mut self) -> u8{
+        let mut data = 0;
+        for (index, pin) in self.d.iter().enumerate() {
+            data |= (pin.is_high() as u8) << index; 
+        }
+        data
+    }
+
+    async fn read_prg_byte(&mut self, address: u16) -> u8 {
+        self.set_read_mode();
+        self.set_prg_read();
+        self.set_romsel_high();
+        self.set_address(address);
+        self.set_phy2_high();
+        self.set_romsel(address);
+        Timer::after_micros(1).await;
+        self.read_data()
+    }
+
+    async fn read_chr_byte(&mut self, address: u16) -> u8 {
+        self.set_read_mode();
+        self.set_phy2_high();
+        self.set_romsel_high();
+        self.set_address(address);
+    }
+
+    async fn dump_prg(&mut self, base: u16, address: u16) {
+        for x in 0..512 {
+            //sdBuffer[x] = 
+            self.read_prg_byte(base + address + x).await;
+        }
+        //myFile.write(sdBuffer, 512);
+    }
+
+    async fn dump_chr(&mut self, address: u16) {
+        for x in 0..512 {
+            //sdBuffer[x] = 
+            self.read_chr_byte(address + x).await;
+        }
+        //myFile.write(sdBuffer, 512);
+    }
+
+    async fn dump_bank_prg(&mut self, from: u16, to: u16, base: u16) {
+        for address in (from..=to).step_by(512) {
+            self.dump_prg(base, address).await;
+        }
+    }
+
+    async fn dump_bank_chr(&mut self, from: u16, to: u16) {
+        for address in (from..=to).step_by(512) {
+            self.dump_chr(address).await;
+        }
+    }
+
+    pub async fn dump(&mut self) {
+        for dpin in &mut self.d {
+            dpin.set_as_input(Pull::Up);
+        }
+        
+        /*
+        let crc32 =    unsafe { &mut *CRC32.0.get() };
+        let crc32_mmc3 =    unsafe { &mut *CRC32_MMC3.0.get() };
+
+        for c in 0..512 {
+            crc32[c] = read_prg_byte(u16::try_from(0x8000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
+            crc32_mmc3[c] = read_prg_byte(u16::try_from(0xE000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
+        } 
+        */
+
+        let mapper = 0;
+        let prglo = 0;
+        let prghi = 1;
+        let chrlo = 0;
+        let chrhi = 1;
+        let ramlo = 0;
+        let ramhi = 2;
+
+        let prgsize = 1;
+        let chrsize = 1;
+        let ramsize = 0;
+        
+        let prg = 2 * 16; // 2^prgsize * 16
+        let chr = 2 * 4; // 2^chrsize * 16
+        let ram = 0; // 0
+        self.read_prg().await;
+        self.read_chr().await;
+    }
+
+    async fn read_prg(&mut self) {
+        self.set_address(0);
+        Timer::after_micros(1).await;
+        let base: u16 = 0x8000;
+        let banks = 2; // 2 ^ prgsize;
+        self.dump_bank_prg(0x0, 0x4000 * banks, base).await;
+    }
+
+    async fn read_chr(&mut self) {
+        self.set_address(0);
+        Timer::after_micros(1).await;
+        self.dump_bank_chr(0x0, 0x2000).await;
+    }
+}
