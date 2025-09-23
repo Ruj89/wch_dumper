@@ -10,18 +10,22 @@ use ch32_hal::peripherals::OTG_FS;
 use embassy_executor::{task, Spawner};
 use embassy_usb::{Builder, UsbDevice};
 use embassy_time::Timer;
+use embassy_sync::channel::Channel;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 mod usb;
 mod dumper;
 
-use crate::usb::mtp::{MtpClass, PtpCommand};
-use crate::dumper::dumper::DumperClass;
+use crate::usb::mtp::{MtpClass};
+use crate::dumper::dumper::{DumperClass, Msg};
 
 const ENDPOINT_COUNT: usize = 14;
 
 bind_interrupts!(struct Irq { 
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
+
+static CH: Channel<CriticalSectionRawMutex, Msg, 4> = Channel::new();
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Wrapper generico: contiene un UnsafeCell ma lo dichiara Sync
@@ -127,6 +131,7 @@ async fn main(spawner: Spawner) -> ! {
             p.PD10,
             p.PD11
         ),
+        &CH
     );
 
     let mtp_class = MtpClass::new(
@@ -170,7 +175,7 @@ async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOI
             Ok(n) if n > 0 => {
                 match mtp.parse_mtp_command(&buf) {
                     Ok(cmd) => {
-                        handle_response(&mut mtp, cmd).await;
+                        mtp.handle_response(cmd).await;
                     }    
                     _ => {
                         // TODO: Handle error
@@ -183,115 +188,6 @@ async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOI
                 Timer::after_millis(1).await;
             }
         }
-    }
-}
-
-async fn handle_response<'a>(mtp: &mut MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>, cmd: PtpCommand<'a>) {
-    let mut buf = [0u8; 1024+12]; //TODO: Remove when 0x1009 has been fixed
-
-    // Data block
-    let mut len;
-    match cmd.op_code {
-        0x1001 => {
-            len = mtp.generate_device_info_response(cmd.transaction_id, &mut buf);
-        }
-        0x1004 => {
-            len = mtp.generate_storage_id_response(cmd.transaction_id, &mut buf);
-        }
-        0x1005 => {
-            len = mtp.generate_storage_info_response(cmd.transaction_id, &mut buf, &cmd);
-        }
-        0x1007 => {
-            len = mtp.generate_object_handles_response(cmd.transaction_id, &mut buf, &cmd);
-        }
-        0x1008 => {
-            len = mtp.generate_object_info_response(cmd.transaction_id, &mut buf, &cmd);
-        }
-        0x1009 => {
-            len = mtp.generate_object_response(cmd.transaction_id, &mut buf, &cmd);
-        }
-        _ => {
-            len = 0;
-        }
-    }
-    let mut offset = 0;
-    while offset < len {
-        let end = core::cmp::min(offset + mtp.max_packet_size(), len);
-        let chunk = &buf[offset..end];
-        match mtp.write_packet(&chunk).await {
-            Ok(_) => {
-                Timer::after_millis(1).await;
-            }
-            _ => {
-                // Allow the USB stack some breathing room; not strictly required
-                // but avoids busy‑looping if the host stalls communication.
-                Timer::after_millis(1).await;
-            }
-        }
-        offset = end;
-    }
-    if offset > 0 && offset % 64 == 0 {
-        match mtp.write_packet(&[]).await {
-            Ok(_) => {
-                Timer::after_millis(1).await;
-            }
-            _ => {
-                // Allow the USB stack some breathing room; not strictly required
-                // but avoids busy‑looping if the host stalls communication.
-                Timer::after_millis(1).await;
-            }
-        }
-    }
-
-    // Response block
-    match cmd.op_code {
-        0x1001 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        0x1002 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        0x1003 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        0x1004 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        0x1005 => {
-            if len == 0 {
-                len = mtp.generate_error_response_block(cmd.transaction_id, &mut buf, 0x2013);
-            } else {
-                len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-            }
-        }
-        0x1007 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        0x1008 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        0x1009 => {
-            len = mtp.generate_ok_response_block(cmd.transaction_id, &mut buf);
-        }
-        _ => {
-            len = 0;
-        }
-    }
-    let mut offset = 0;
-    while offset < len {
-        let end = core::cmp::min(offset + mtp.max_packet_size(), len);
-        let chunk = &buf[offset..end];
-        match mtp.write_packet(&chunk).await {
-            Ok(_) => {
-                Timer::after_millis(1).await;
-            }
-            _ => {
-                // Allow the USB stack some breathing room; not strictly required
-                // but avoids busy‑looping if the host stalls communication.
-                Timer::after_millis(1).await;
-            }
-        }
-        offset = end;
     }
 }
 

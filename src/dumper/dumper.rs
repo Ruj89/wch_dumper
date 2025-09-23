@@ -1,27 +1,26 @@
 use ch32_hal::{gpio::{Flex, Input, Level, Output, Pin, Pull}, Peripheral};
+use embassy_time::Timer;
 use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::Timer;
 
-enum Msg {
+pub enum Msg {
     Start,
     Data([u8; 512]),
     End,
 }
 
-static CH: Channel<CriticalSectionRawMutex, Msg, 8> = Channel::new();
-
 pub struct DumperClass<'d> {
     m2: Output<'d>,
     pgr_ce: Output<'d>,
-    chr_wr: Output<'d>,
-    ciram_ce: Input<'d>,
+    //chr_wr: Output<'d>,
+    //ciram_ce: Input<'d>,
     chr_rd: Output<'d>,
-    irq: Input<'d>,
+    //irq: Input<'d>,
     prg_rw: Output<'d>,
     a: [Output<'d>; 16],
-    ciram_a10: Input<'d>,
+    //ciram_a10: Input<'d>,
     d: [Flex<'d>; 8],
+    channel: &'d Channel<CriticalSectionRawMutex, Msg, 4>,
 }
 
 impl<'d> DumperClass<'d>
@@ -63,13 +62,14 @@ impl<'d> DumperClass<'d>
             impl Peripheral<P = impl Pin> + 'd,
             impl Peripheral<P = impl Pin> + 'd,
         ),
+        channel: &'d Channel<CriticalSectionRawMutex, Msg, 4>
     ) -> Self {
         let m2 = Output::new(m2_pin, Level::High, Default::default());
         let pgr_ce = Output::new(pgr_ce_pin, Level::High, Default::default());
-        let chr_wr = Output::new(chr_wr_pin, Level::High, Default::default());
-        let ciram_ce = Input::new(ciram_ce_pin, Pull::Up);
+        Output::new(chr_wr_pin, Level::High, Default::default()); // let chr_wr = 
+        Input::new(ciram_ce_pin, Pull::Up); // let ciram_ce = 
         let chr_rd = Output::new(chr_rd_pin, Level::High, Default::default());
-        let irq = Input::new(irq_pin, Pull::Up);
+        Input::new(irq_pin, Pull::Up); // let irq = 
         let prg_rw = Output::new(prg_rw_pin, Level::High, Default::default());
         
         let a = [
@@ -91,7 +91,7 @@ impl<'d> DumperClass<'d>
             Output::new(a_pins.15, Level::High, Default::default()),
         ];
 
-        let ciram_a10 = Input::new(ciram_a10_pin, Pull::Up);
+        Input::new(ciram_a10_pin, Pull::Up); // let ciram_a10 = 
 
         let d = [
             Flex::new(d_pins.0),
@@ -107,14 +107,15 @@ impl<'d> DumperClass<'d>
        return Self { 
             m2: m2, 
             pgr_ce: pgr_ce, 
-            chr_wr: chr_wr, 
-            ciram_ce: ciram_ce, 
+            //chr_wr: chr_wr, 
+            //ciram_ce: ciram_ce, 
             chr_rd: chr_rd, 
-            irq: irq,
+            //irq: irq,
             prg_rw:  prg_rw,
             a: a,
-            ciram_a10: ciram_a10,
+            //ciram_a10: ciram_a10,
             d: d,
+            channel: channel,
         }
     }
 
@@ -140,12 +141,12 @@ impl<'d> DumperClass<'d>
         }
     }
 
-    fn set_write_mode(&mut self) {
-        for pin in self.d.iter_mut() {
-            pin.set_as_output(Default::default());
-            pin.set_low();
-        }
-    }
+    //fn set_write_mode(&mut self) {
+    //    for pin in self.d.iter_mut() {
+    //        pin.set_as_output(Default::default());
+    //        pin.set_low();
+    //    }
+    //}
 
     fn set_prg_read(&mut self){
         self.prg_rw.set_high();
@@ -171,8 +172,16 @@ impl<'d> DumperClass<'d>
         self.m2.set_high();
     }
 
-    fn set_phy2_low(&mut self){
-        self.m2.set_low();
+    //fn set_phy2_low(&mut self){
+    //    self.m2.set_low();
+    //}
+
+    fn set_chr_read_high(&mut self){
+        self.chr_rd.set_high();
+    }
+
+    fn set_chr_read_low(&mut self){
+        self.chr_rd.set_low();
     }
 
     fn read_data(&mut self) -> u8{
@@ -199,6 +208,11 @@ impl<'d> DumperClass<'d>
         self.set_phy2_high();
         self.set_romsel_high();
         self.set_address(address);
+        self.set_chr_read_low();
+        Timer::after_micros(1).await;
+        let result = self.read_data();
+        self.set_chr_read_high();
+        result
     }
 
     async fn dump_prg(&mut self, base: u16, address: u16) {
@@ -242,7 +256,6 @@ impl<'d> DumperClass<'d>
             crc32[c] = read_prg_byte(u16::try_from(0x8000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
             crc32_mmc3[c] = read_prg_byte(u16::try_from(0xE000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
         } 
-        */
 
         let mapper = 0;
         let prglo = 0;
@@ -259,6 +272,7 @@ impl<'d> DumperClass<'d>
         let prg = 2 * 16; // 2^prgsize * 16
         let chr = 2 * 4; // 2^chrsize * 16
         let ram = 0; // 0
+        */
         self.read_prg().await;
         self.read_chr().await;
     }

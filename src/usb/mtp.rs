@@ -1,5 +1,6 @@
 //! MTP class implementation.
 
+use embassy_time::Timer;
 use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
 use embassy_usb::{Builder};
 
@@ -7,18 +8,6 @@ use embassy_usb::{Builder};
 const USB_CLASS_MTP: u8 = 0x06;
 const MTP_SUBCLASS: u8 = 0x01;
 const MTP_PROTOCOL: u8 = 0x01;
-
-const CS_INTERFACE: u8 = 0x24;
-const CDC_TYPE_HEADER: u8 = 0x00;
-const CDC_TYPE_ACM: u8 = 0x02;
-const CDC_TYPE_UNION: u8 = 0x06;
-
-const REQ_SEND_ENCAPSULATED_COMMAND: u8 = 0x00;
-#[allow(unused)]
-const REQ_GET_ENCAPSULATED_COMMAND: u8 = 0x01;
-const REQ_SET_LINE_CODING: u8 = 0x20;
-const REQ_GET_LINE_CODING: u8 = 0x21;
-const REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 
 #[derive(Debug)]
 pub struct PtpCommand<'a> {
@@ -29,7 +18,6 @@ pub struct PtpCommand<'a> {
 
 /// Errors returned by [`MtpClass::parse_mtp_command`]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum MtpError {
     CannotParseHeader,
     WrongPacketType
@@ -360,68 +348,112 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
-    /// Split the class into a sender and receiver.
-    ///
-    /// This allows concurrently sending and receiving packets from separate tasks.
-    pub fn split(self) -> (Sender<'d, D>, Receiver<'d, D>) {
-        (
-            Sender {
-                write_ep: self.write_ep,
-            },
-            Receiver {
-                read_ep: self.read_ep,
-            },
-        )
-    }
-}
+    pub async fn handle_response<'a>(&mut self, cmd: PtpCommand<'a>) {
+        let mut buf = [0u8; 1024+12]; //TODO: Remove when 0x1009 has been fixed
 
-/// MTP class packet sender.
-///
-/// You can obtain a `Sender` with [`MtpClass::split`]
-pub struct Sender<'d, D: Driver<'d>> {
-    write_ep: D::EndpointIn,
-}
+        // Data block
+        let mut len;
+        match cmd.op_code {
+            0x1001 => {
+                len = self.generate_device_info_response(cmd.transaction_id, &mut buf);
+            }
+            0x1004 => {
+                len = self.generate_storage_id_response(cmd.transaction_id, &mut buf);
+            }
+            0x1005 => {
+                len = self.generate_storage_info_response(cmd.transaction_id, &mut buf, &cmd);
+            }
+            0x1007 => {
+                len = self.generate_object_handles_response(cmd.transaction_id, &mut buf, &cmd);
+            }
+            0x1008 => {
+                len = self.generate_object_info_response(cmd.transaction_id, &mut buf, &cmd);
+            }
+            0x1009 => {
+                len = self.generate_object_response(cmd.transaction_id, &mut buf, &cmd);
+            }
+            _ => {
+                len = 0;
+            }
+        }
+        let mut offset = 0;
+        while offset < len {
+            let end = core::cmp::min(offset + self.max_packet_size(), len);
+            let chunk = &buf[offset..end];
+            match self.write_packet(&chunk).await {
+                Ok(_) => {
+                    Timer::after_millis(1).await;
+                }
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+            offset = end;
+        }
+        if offset > 0 && offset % 64 == 0 {
+            match self.write_packet(&[]).await {
+                Ok(_) => {
+                    Timer::after_millis(1).await;
+                }
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+        }
 
-impl<'d, D: Driver<'d>> Sender<'d, D> {
-    /// Gets the maximum packet size in bytes.
-    pub fn max_packet_size(&self) -> u16 {
-        // The size is the same for both endpoints.
-        self.write_ep.info().max_packet_size
-    }
-
-    /// Writes a single packet into the IN endpoint.
-    pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
-        self.write_ep.write(data).await
-    }
-
-    /// Waits for the USB host to enable this interface
-    pub async fn wait_connection(&mut self) {
-        self.write_ep.wait_enabled().await;
-    }
-}
-
-/// MTP class packet receiver.
-///
-/// You can obtain a `Receiver` with [`MtpClass::split`]
-pub struct Receiver<'d, D: Driver<'d>> {
-    read_ep: D::EndpointOut,
-}
-
-impl<'d, D: Driver<'d>> Receiver<'d, D> {
-    /// Gets the maximum packet size in bytes.
-    pub fn max_packet_size(&self) -> u16 {
-        // The size is the same for both endpoints.
-        self.read_ep.info().max_packet_size
-    }
-
-    /// Reads a single packet from the OUT endpoint.
-    /// Must be called with a buffer large enough to hold max_packet_size bytes.
-    pub async fn read_packet(&mut self, data: &mut [u8]) -> Result<usize, EndpointError> {
-        self.read_ep.read(data).await
-    }
-
-    /// Waits for the USB host to enable this interface
-    pub async fn wait_connection(&mut self) {
-        self.read_ep.wait_enabled().await;
+        // Response block
+        match cmd.op_code {
+            0x1001 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x1002 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x1003 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x1004 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x1005 => {
+                if len == 0 {
+                    len = self.generate_error_response_block(cmd.transaction_id, &mut buf, 0x2013);
+                } else {
+                    len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+                }
+            }
+            0x1007 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x1008 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x1009 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            _ => {
+                len = 0;
+            }
+        }
+        let mut offset = 0;
+        while offset < len {
+            let end = core::cmp::min(offset + self.max_packet_size(), len);
+            let chunk = &buf[offset..end];
+            match self.write_packet(&chunk).await {
+                Ok(_) => {
+                    Timer::after_millis(1).await;
+                }
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+            offset = end;
+        }
     }
 }
