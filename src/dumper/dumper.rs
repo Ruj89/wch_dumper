@@ -3,11 +3,14 @@ use embassy_time::Timer;
 use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
+pub const DATA_CHANNEL_SIZE: usize = 32;
 pub enum Msg {
     Start,
-    Data([u8; 512]),
+    TotalLength(u32),
+    Data([u8; DATA_CHANNEL_SIZE]),
     End,
 }
+
 
 pub struct DumperClass<'d> {
     m2: Output<'d>,
@@ -20,7 +23,8 @@ pub struct DumperClass<'d> {
     a: [Output<'d>; 16],
     //ciram_a10: Input<'d>,
     d: [Flex<'d>; 8],
-    channel: &'d Channel<CriticalSectionRawMutex, Msg, 4>,
+    channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+    buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
 }
 
 impl<'d> DumperClass<'d>
@@ -62,7 +66,8 @@ impl<'d> DumperClass<'d>
             impl Peripheral<P = impl Pin> + 'd,
             impl Peripheral<P = impl Pin> + 'd,
         ),
-        channel: &'d Channel<CriticalSectionRawMutex, Msg, 4>
+        channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+        buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
     ) -> Self {
         let m2 = Output::new(m2_pin, Level::High, Default::default());
         let pgr_ce = Output::new(pgr_ce_pin, Level::High, Default::default());
@@ -105,34 +110,27 @@ impl<'d> DumperClass<'d>
         ];
 
        return Self { 
-            m2: m2, 
-            pgr_ce: pgr_ce, 
-            //chr_wr: chr_wr, 
-            //ciram_ce: ciram_ce, 
-            chr_rd: chr_rd, 
-            //irq: irq,
-            prg_rw:  prg_rw,
-            a: a,
-            //ciram_a10: ciram_a10,
-            d: d,
-            channel: channel,
+            m2, 
+            pgr_ce, 
+            //chr_wr, 
+            //ciram_ce, 
+            chr_rd, 
+            //irq,
+            prg_rw,
+            a,
+            //ciram_a10,
+            d,
+            channel,
+            buffer,
         }
     }
 
     fn set_address(&mut self, address: u16) {
-        let mut values: [Level; 16] = [Level::Low; 16];
-
-        // Prepare values
         for index in 0..self.a.len() - 1 {
-            values[index] = Level::from((address & (1 << index)) > 0)
+            self.a[index].set_level(Level::from((address & (1 << index)) > 0));
         }
         // PPU /A13
-        values[self.a.len()-1] = Level::from((address & (1 << 13)) == 0);
-        
-        // Set GPIO values
-        for index in 0..self.a.len() {
-            self.a[index].set_level(values[index]); 
-        }
+        self.a[self.a.len()-1].set_level(Level::from((address & (1 << 13)) == 0));
     }
 
     fn set_read_mode(&mut self) {
@@ -216,29 +214,27 @@ impl<'d> DumperClass<'d>
     }
 
     async fn dump_prg(&mut self, base: u16, address: u16) {
-        for x in 0..512 {
-            //sdBuffer[x] = 
-            self.read_prg_byte(base + address + x).await;
+        for x in 0..self.buffer.len() {
+             self.buffer[x] = self.read_prg_byte(base + address + x as u16).await;
         }
-        //myFile.write(sdBuffer, 512);
+        self.channel.send(Msg::Data(*self.buffer)).await;
     }
 
     async fn dump_chr(&mut self, address: u16) {
-        for x in 0..512 {
-            //sdBuffer[x] = 
-            self.read_chr_byte(address + x).await;
+        for x in 0..self.buffer.len() {
+            self.buffer[x] = self.read_chr_byte(address + x as u16).await;
         }
-        //myFile.write(sdBuffer, 512);
+        self.channel.send(Msg::Data(*self.buffer)).await;
     }
 
     async fn dump_bank_prg(&mut self, from: u16, to: u16, base: u16) {
-        for address in (from..=to).step_by(512) {
+        for address in (from..to).step_by(DATA_CHANNEL_SIZE) {
             self.dump_prg(base, address).await;
         }
     }
 
     async fn dump_bank_chr(&mut self, from: u16, to: u16) {
-        for address in (from..=to).step_by(512) {
+        for address in (from..to).step_by(DATA_CHANNEL_SIZE) {
             self.dump_chr(address).await;
         }
     }
@@ -268,13 +264,24 @@ impl<'d> DumperClass<'d>
         let prgsize = 1;
         let chrsize = 1;
         let ramsize = 0;
+        */
         
         let prg = 2 * 16; // 2^prgsize * 16
-        let chr = 2 * 4; // 2^chrsize * 16
+        let chr = 2 * 4; // 2^chrsize * 4
         let ram = 0; // 0
-        */
-        self.read_prg().await;
-        self.read_chr().await;
+
+        let receiver = self.channel.receiver();
+        loop {
+            match receiver.receive().await {
+                Msg::Start => {
+                    self.channel.send(Msg::TotalLength((prg + chr + ram)*1024)).await;
+                    self.read_prg().await;
+                    self.read_chr().await;
+                    self.channel.send(Msg::End).await;
+                }
+                _ => {}
+            }
+        }
     }
 
     async fn read_prg(&mut self) {

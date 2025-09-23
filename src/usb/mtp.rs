@@ -3,6 +3,10 @@
 use embassy_time::Timer;
 use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
 use embassy_usb::{Builder};
+use embassy_sync::channel::Channel;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+use crate::dumper::dumper::Msg;
 
 /// This should be used as `device_class` when building the `UsbDevice`.
 const USB_CLASS_MTP: u8 = 0x06;
@@ -39,12 +43,15 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     //_comm_ep: D::EndpointIn,
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
+    channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     /// Creates a new MtpClass with the provided UsbBus and `max_packet_size` in bytes. For
     /// full-speed devices, `max_packet_size` has to be one of 8, 16, 32 or 64.
-    pub fn new(builder: &mut Builder<'d, D>, max_packet_size: u16) -> Self {
+    pub fn new(builder: &mut Builder<'d, D>, 
+               max_packet_size: u16,
+               channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
@@ -60,6 +67,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
+            channel,
         }
     }
 
@@ -154,7 +162,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         *offset += 2;
     }
 
-    pub fn generate_ok_response_block(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+    fn generate_ok_response_block(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let length = 12u32.to_le_bytes();
         let packet_type = 0x0003u16.to_le_bytes();       // Response Block
         let response_code = 0x2001u16.to_le_bytes();     // OK
@@ -168,7 +176,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         12
     }
 
-    pub fn generate_error_response_block(&self, transaction_id: u32, buffer: &mut [u8], error: u16) -> usize {
+    fn generate_error_response_block(&self, transaction_id: u32, buffer: &mut [u8], error: u16) -> usize {
         let length = 12u32.to_le_bytes();
         let packet_type = 0x0003u16.to_le_bytes();       // Response Block
         let response_code = error.to_le_bytes();     // OK
@@ -182,7 +190,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         12
     }
 
-    pub fn generate_device_info_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+    fn generate_device_info_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let mut offset = 12;
         Self::write_u16(buffer, &mut offset, 110); // StandardVersion
         Self::write_u32(buffer, &mut offset, 6); // VendorExtensionID = 6 (Microsoft)
@@ -237,7 +245,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
-    pub fn generate_storage_id_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+    fn generate_storage_id_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let mut offset = 12;
         Self::write_u32(buffer, &mut offset, 1); // NumStorageIDs
         Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
@@ -250,7 +258,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
-    pub fn generate_storage_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
+    fn generate_storage_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let storage_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
         if storage_id != 0x00010001 {
             return 0;
@@ -275,7 +283,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
-    pub fn generate_object_handles_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
+    fn generate_object_handles_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let mut offset = 12;
         let storage_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
         if storage_id == 0xFFFFFFFF {
@@ -296,7 +304,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
-    pub fn generate_object_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
+    fn generate_object_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
         if object_handle != 0x00000001 {
             return 0;
@@ -331,25 +339,91 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
     
-    pub fn generate_object_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
+    async fn generate_object_response<'a>(&mut self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
         if object_handle != 0x00000001 {
             return 0;
         }
-        let mut offset = 12;
-        //Self::write_buffer(buffer, &mut offset, self.crc32);       // File content        
-        //Self::write_buffer(buffer, &mut offset, self.crc32_mmc3);       // File content        
-        let total_len = offset as u32;
-        Self::write_u32(buffer, &mut 0, total_len);
-        Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data
-        Self::write_u16(buffer, &mut 6, 0x1009);    // Operation: GetStorageIDs
-        Self::write_u32(buffer, &mut 8, transaction_id);
+        let mut offset = 0;
+        self.channel.send(Msg::Start).await;
+        let receiver = self.channel.receiver();
+        loop {
+            match receiver.receive().await {
+                Msg::TotalLength(length) => {
+                    Self::write_u32(buffer, &mut offset, length);
+                    Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
+                    Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetStorageIDs
+                    Self::write_u32(buffer, &mut offset, transaction_id);
+                },
+                Msg::Data(data) => {
+                    if offset + data.len() >= self.max_packet_size() {
+                        let buffer_write_size = self.max_packet_size() - offset;
+                        Self::write_buffer(buffer, &mut offset, &data[..buffer_write_size]);
+                        match self.write_packet(&buffer).await {
+                            Ok(_) => {
+                                Timer::after_millis(1).await;
+                                offset = 0;
+                                if buffer_write_size != data.len(){
+                                    Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
+                                }
+                            }
+                            _ => {
+                                // Allow the USB stack some breathing room; not strictly required
+                                // but avoids busy‑looping if the host stalls communication.
+                                Timer::after_millis(1).await;
+                                break;
+                            }
+                        }
+                    }
+                },
+                Msg::End => {
+                    if offset > 0 {
+                        match self.write_packet(&buffer[..offset]).await {
+                            _ => {
+                                // Allow the USB stack some breathing room; not strictly required
+                                // but avoids busy‑looping if the host stalls communication.
+                                Timer::after_millis(1).await;
+                            }
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }     
 
-        offset
+        0
+    }
+
+    async fn write_response_buffer(&mut self, buf: &[u8], len: usize) {
+        let mut offset = 0;
+        while offset < len {
+            let end = core::cmp::min(offset + self.max_packet_size(), len);
+            let chunk = &buf[offset..end];
+            match self.write_packet(&chunk).await {
+                Ok(_) => {
+                    Timer::after_millis(1).await;
+                }
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+            offset = end;
+        }
+        if offset > 0 && offset % 64 == 0 {
+            match self.write_packet(&[]).await {
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+        }
     }
 
     pub async fn handle_response<'a>(&mut self, cmd: PtpCommand<'a>) {
-        let mut buf = [0u8; 1024+12]; //TODO: Remove when 0x1009 has been fixed
+        let mut buf = [0u8; 1024];
 
         // Data block
         let mut len;
@@ -370,39 +444,14 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 len = self.generate_object_info_response(cmd.transaction_id, &mut buf, &cmd);
             }
             0x1009 => {
-                len = self.generate_object_response(cmd.transaction_id, &mut buf, &cmd);
+                len = self.generate_object_response(cmd.transaction_id, &mut buf, &cmd).await;
             }
             _ => {
                 len = 0;
             }
         }
-        let mut offset = 0;
-        while offset < len {
-            let end = core::cmp::min(offset + self.max_packet_size(), len);
-            let chunk = &buf[offset..end];
-            match self.write_packet(&chunk).await {
-                Ok(_) => {
-                    Timer::after_millis(1).await;
-                }
-                _ => {
-                    // Allow the USB stack some breathing room; not strictly required
-                    // but avoids busy‑looping if the host stalls communication.
-                    Timer::after_millis(1).await;
-                }
-            }
-            offset = end;
-        }
-        if offset > 0 && offset % 64 == 0 {
-            match self.write_packet(&[]).await {
-                Ok(_) => {
-                    Timer::after_millis(1).await;
-                }
-                _ => {
-                    // Allow the USB stack some breathing room; not strictly required
-                    // but avoids busy‑looping if the host stalls communication.
-                    Timer::after_millis(1).await;
-                }
-            }
+        if len > 0 {
+            self.write_response_buffer(&buf, len).await;
         }
 
         // Response block
@@ -444,9 +493,6 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             let end = core::cmp::min(offset + self.max_packet_size(), len);
             let chunk = &buf[offset..end];
             match self.write_packet(&chunk).await {
-                Ok(_) => {
-                    Timer::after_millis(1).await;
-                }
                 _ => {
                     // Allow the USB stack some breathing room; not strictly required
                     // but avoids busy‑looping if the host stalls communication.

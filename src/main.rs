@@ -17,7 +17,7 @@ mod usb;
 mod dumper;
 
 use crate::usb::mtp::{MtpClass};
-use crate::dumper::dumper::{DumperClass, Msg};
+use crate::dumper::dumper::{DumperClass, Msg, DATA_CHANNEL_SIZE};
 
 const ENDPOINT_COUNT: usize = 14;
 
@@ -25,7 +25,7 @@ bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
 
-static CH: Channel<CriticalSectionRawMutex, Msg, 4> = Channel::new();
+static CH: Channel<CriticalSectionRawMutex, Msg, 1> = Channel::new();
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Wrapper generico: contiene un UnsafeCell ma lo dichiara Sync
@@ -53,6 +53,7 @@ static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0;
 static BOS_DESCRIPTOR   : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static MSOS_DESCRIPTOR  : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static CONTROL_BUF      : StaticCell<[u8;  64]> = StaticCell(UnsafeCell::new([0;  64]));
+static DUMPER_BUF       : StaticCell<[u8;  DATA_CHANNEL_SIZE]> = StaticCell(UnsafeCell::new([0;  DATA_CHANNEL_SIZE]));
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
@@ -131,12 +132,14 @@ async fn main(spawner: Spawner) -> ! {
             p.PD10,
             p.PD11
         ),
-        &CH
+        &CH,
+        unsafe { &mut *DUMPER_BUF.0.get() },
     );
 
     let mtp_class = MtpClass::new(
         &mut builder, 
-        MAX_PACKET_SIZE
+        MAX_PACKET_SIZE,
+        &CH
     );
 
     // Build the final `UsbDevice` which owns the internal state.
