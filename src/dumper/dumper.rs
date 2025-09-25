@@ -268,8 +268,9 @@ impl<'d> DumperClass<'d>
         let chrsize = 1;
         let ramsize = 0;
         */
-        
-        let prg = 2 * 16; // 2^prgsize * 16
+        let prg_banks = 1;
+
+        let prg = prg_banks * 16; // 2^prgsize * 16
         let chr = 2 * 4; // 2^chrsize * 4
         //let ram = 0; // 0
 
@@ -279,7 +280,7 @@ impl<'d> DumperClass<'d>
                 Msg::Start => {
                     self.out_channel.send(Msg::TotalLength(prg, chr)).await;
 
-                    self.read_prg().await;
+                    self.read_prg(prg_banks).await;
                     self.read_chr().await;
                     self.out_channel.send(Msg::End).await;
                 }
@@ -288,12 +289,11 @@ impl<'d> DumperClass<'d>
         }
     }
 
-    async fn read_prg(&mut self) {
+    async fn read_prg(&mut self, banks: u8) {
         self.set_address(0);
         Timer::after_micros(1).await;
         let base: u16 = 0x8000;
-        let banks = 2; // 2 ^ prgsize;
-        self.dump_bank_prg(0x0, 0x4000 * banks, base).await;
+        self.dump_bank_prg(0x0, 0x4000 * (banks as u16), base).await;
     }
 
     async fn read_chr(&mut self) {
