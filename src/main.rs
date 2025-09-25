@@ -25,7 +25,8 @@ bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
 
-static CH: Channel<CriticalSectionRawMutex, Msg, 1> = Channel::new();
+static TO_DUMPER_CHANNEL: Channel<CriticalSectionRawMutex, Msg, 1> = Channel::new();
+static TO_USB_CHANNEL: Channel<CriticalSectionRawMutex, Msg, 1> = Channel::new();
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Wrapper generico: contiene un UnsafeCell ma lo dichiara Sync
@@ -132,14 +133,16 @@ async fn main(spawner: Spawner) -> ! {
             p.PD10,
             p.PD11
         ),
-        &CH,
+        &TO_DUMPER_CHANNEL,
+        &TO_USB_CHANNEL,
         unsafe { &mut *DUMPER_BUF.0.get() },
     );
 
     let mtp_class = MtpClass::new(
         &mut builder, 
         MAX_PACKET_SIZE,
-        &CH
+        &TO_USB_CHANNEL,
+        &TO_DUMPER_CHANNEL,
     );
 
     // Build the final `UsbDevice` which owns the internal state.

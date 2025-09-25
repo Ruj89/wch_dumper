@@ -43,15 +43,17 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     //_comm_ep: D::EndpointIn,
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
-    channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+    in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+    out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     /// Creates a new MtpClass with the provided UsbBus and `max_packet_size` in bytes. For
     /// full-speed devices, `max_packet_size` has to be one of 8, 16, 32 or 64.
     pub fn new(builder: &mut Builder<'d, D>, 
-               max_packet_size: u16,
-               channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>) -> Self {
+        max_packet_size: u16,
+        in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+        out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
@@ -67,7 +69,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
-            channel,
+            in_channel,
+            out_channel,
         }
     }
 
@@ -112,6 +115,12 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             transaction_id,
             payload,
         })
+    }
+
+    // Helper: write little-endian u8
+    fn write_u8(buf: &mut [u8], offset: &mut usize, val: u8) {
+        buf[*offset] = val;
+        *offset += 1;
     }
 
     // Helper: write little-endian u16
@@ -313,7 +322,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
         Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
         Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
-        Self::write_u32(buffer, &mut offset, 32);//(self.crc32.len()+self.crc32_mmc3.len()).try_into().unwrap()); // Object Compressed Size
+        Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
         Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
         Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
         Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
@@ -325,7 +334,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
         Self::write_u32(buffer, &mut offset, 0); // Association Description
         Self::write_u32(buffer, &mut offset, 0); // Sequence Number
-        Self::write_string(buffer, &mut offset, "crc32_and_mmc3.dat"); // Filename
+        Self::write_string(buffer, &mut offset, "rom.nes"); // Filename
         Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
         Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
         Self::write_string(buffer, &mut offset, "0"); // Keywords
@@ -345,25 +354,30 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             return 0;
         }
         let mut offset = 0;
-        self.channel.send(Msg::Start).await;
-        let receiver = self.channel.receiver();
+        self.out_channel.send(Msg::Start).await;
+        let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
-                Msg::TotalLength(length) => {
-                    Self::write_u32(buffer, &mut offset, length);
+                Msg::TotalLength(prg_length, chr_length) => {
+                    Self::write_u32(buffer, &mut offset, ((prg_length + chr_length) as u32 * 1024 + 12 + 16).try_into().unwrap());
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
                     Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetStorageIDs
                     Self::write_u32(buffer, &mut offset, transaction_id);
+                    // 16 byte header
+                    Self::write_buffer(buffer, &mut offset, &[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
+                    Self::write_u8(buffer, &mut offset, prg_length);
+                    Self::write_u8(buffer, &mut offset, chr_length);
+                    Self::write_buffer(buffer, &mut offset, &[0x00u8; 10]);
                 },
                 Msg::Data(data) => {
-                    if offset + data.len() >= self.max_packet_size() {
-                        let buffer_write_size = self.max_packet_size() - offset;
-                        Self::write_buffer(buffer, &mut offset, &data[..buffer_write_size]);
+                    let buffer_write_size = core::cmp::min(data.len() ,self.max_packet_size() - offset);
+                    Self::write_buffer(buffer, &mut offset, &data[..buffer_write_size]);
+                    if offset == self.max_packet_size() {
                         match self.write_packet(&buffer).await {
                             Ok(_) => {
                                 Timer::after_millis(1).await;
                                 offset = 0;
-                                if buffer_write_size != data.len(){
+                                if buffer_write_size != data.len() {
                                     Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
                                 }
                             }
@@ -386,6 +400,16 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                             }
                         }
                     }
+                    if offset % 64 == 0 {
+                        match self.write_packet(&[]).await {
+                            _ => {
+                                // Allow the USB stack some breathing room; not strictly required
+                                // but avoids busy‑looping if the host stalls communication.
+                                Timer::after_millis(1).await;
+                            }
+                        }
+                    }
+                    break;
                 },
                 _ => {}
             }

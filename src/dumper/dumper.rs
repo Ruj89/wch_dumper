@@ -6,7 +6,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 pub const DATA_CHANNEL_SIZE: usize = 32;
 pub enum Msg {
     Start,
-    TotalLength(u32),
+    TotalLength(u8, u8),
     Data([u8; DATA_CHANNEL_SIZE]),
     End,
 }
@@ -23,7 +23,8 @@ pub struct DumperClass<'d> {
     a: [Output<'d>; 16],
     //ciram_a10: Input<'d>,
     d: [Flex<'d>; 8],
-    channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+    in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+    out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
 }
 
@@ -66,7 +67,8 @@ impl<'d> DumperClass<'d>
             impl Peripheral<P = impl Pin> + 'd,
             impl Peripheral<P = impl Pin> + 'd,
         ),
-        channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+        in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+        out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
     ) -> Self {
         let m2 = Output::new(m2_pin, Level::High, Default::default());
@@ -120,7 +122,8 @@ impl<'d> DumperClass<'d>
             a,
             //ciram_a10,
             d,
-            channel,
+            in_channel,
+            out_channel,
             buffer,
         }
     }
@@ -217,14 +220,14 @@ impl<'d> DumperClass<'d>
         for x in 0..self.buffer.len() {
              self.buffer[x] = self.read_prg_byte(base + address + x as u16).await;
         }
-        self.channel.send(Msg::Data(*self.buffer)).await;
+        self.out_channel.send(Msg::Data(*self.buffer)).await;
     }
 
     async fn dump_chr(&mut self, address: u16) {
         for x in 0..self.buffer.len() {
             self.buffer[x] = self.read_chr_byte(address + x as u16).await;
         }
-        self.channel.send(Msg::Data(*self.buffer)).await;
+        self.out_channel.send(Msg::Data(*self.buffer)).await;
     }
 
     async fn dump_bank_prg(&mut self, from: u16, to: u16, base: u16) {
@@ -268,16 +271,17 @@ impl<'d> DumperClass<'d>
         
         let prg = 2 * 16; // 2^prgsize * 16
         let chr = 2 * 4; // 2^chrsize * 4
-        let ram = 0; // 0
+        //let ram = 0; // 0
 
-        let receiver = self.channel.receiver();
+        let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
                 Msg::Start => {
-                    self.channel.send(Msg::TotalLength((prg + chr + ram)*1024)).await;
+                    self.out_channel.send(Msg::TotalLength(prg, chr)).await;
+
                     self.read_prg().await;
                     self.read_chr().await;
-                    self.channel.send(Msg::End).await;
+                    self.out_channel.send(Msg::End).await;
                 }
                 _ => {}
             }
