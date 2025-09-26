@@ -6,7 +6,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 pub const DATA_CHANNEL_SIZE: usize = 32;
 pub enum Msg {
     Start,
-    DumpSetupData(u8, u8, u8),
+    DumpSetupData{
+        mapper: u8,
+        prg_length_16k: u8,
+        chr_length_8k: u8,
+    },
     Data([u8; DATA_CHANNEL_SIZE]),
     End,
 }
@@ -136,13 +140,13 @@ impl<'d> DumperClass<'d>
         self.a[self.a.len()-1].set_level(Level::from((address & (1 << 13)) == 0));
     }
 
-    fn set_read_mode(&mut self) {
+    fn set_mode_read(&mut self) {
         for pin in self.d.iter_mut() {
             pin.set_as_input(Pull::Up);
         }
     }
 
-    fn set_write_mode(&mut self) {
+    fn set_mode_write(&mut self) {
         for pin in self.d.iter_mut() {
             pin.set_as_output(Default::default());
             pin.set_low();
@@ -206,7 +210,7 @@ impl<'d> DumperClass<'d>
     async fn write_prg_byte(&mut self, address: u16, data: u8) {
         self.set_phy2_low();
         self.set_romsel_high();
-        self.set_write_mode();
+        self.set_mode_write();
         self.set_prg_write();
         self.write_data(data);
 
@@ -224,7 +228,7 @@ impl<'d> DumperClass<'d>
         // Back to read mode
         //  _delay_us(1);
         self.set_prg_read();
-        self.set_read_mode();
+        self.set_mode_read();
         self.set_address(0);
         // Set phi2 to high state to keep cartridge unreseted
         //  _delay_us(1);
@@ -233,7 +237,7 @@ impl<'d> DumperClass<'d>
     }
 
     async fn read_prg_byte(&mut self, address: u16) -> u8 {
-        self.set_read_mode();
+        self.set_mode_read();
         self.set_prg_read();
         self.set_romsel_high();
         self.set_address(address);
@@ -244,7 +248,7 @@ impl<'d> DumperClass<'d>
     }
 
     async fn read_chr_byte(&mut self, address: u16) -> u8 {
-        self.set_read_mode();
+        self.set_mode_read();
         self.set_phy2_high();
         self.set_romsel_high();
         self.set_address(address);
@@ -311,26 +315,36 @@ impl<'d> DumperClass<'d>
         let ramlo = 0;
         let ramhi = 1;
 
+        let mapper = 0;
         let prgsize = 1;
         let chrsize = 1;
         let ramsize = 0;
-        */
-        let mapper = 4;
-        let prg_banks = 4;
-        let chr_banks = 5;
+        let prg = 32; // KB
+        let chr = 8; // KB
 
-        let prg = (1 << prg_banks) * 16; // 2^prgsize * 16
-        let chr = (1 << chr_banks) * 4; // 2^chrsize * 4
+        let mapper = 0;
+        let prgsize = 0;
+        let chrsize = 1;
+        let ramsize = 0;
+        let prg = 16; // KB
+        let chr = 8; // KB
+        */
+        
+        let mapper = 4;
+        let prgsize = 4;
+        let chrsize = 5;
+        let prg: u16 = 256; // KB
+        let chr: u16 = 128; // KB
         //let ram = 0; // 0
 
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
                 Msg::Start => {
-                    self.out_channel.send(Msg::DumpSetupData(mapper, prg, chr)).await;
+                    self.out_channel.send(Msg::DumpSetupData{mapper, prg_length_16k: (prg / 16) as u8, chr_length_8k: (chr / 8) as u8}).await;
 
-                    self.read_prg(mapper, prg_banks).await;
-                    self.read_chr(mapper, chr_banks).await;
+                    self.read_prg(mapper, prgsize).await;
+                    self.read_chr(mapper, chrsize).await;
                     self.out_channel.send(Msg::End).await;
                 }
                 _ => {}
@@ -338,28 +352,40 @@ impl<'d> DumperClass<'d>
         }
     }
 
-    async fn read_prg(&mut self, mapper: u8, banks: u8) {
+    async fn read_prg(&mut self, mapper: u8, size: u8) {
         self.set_address(0);
         Timer::after_micros(1).await;
+        let base: u16 = 0x8000;
+        let mut finalize = true;
         match mapper {
             0 => {
-                let base: u16 = 0x8000;
-                self.dump_bank_prg(0x0, 0x4000 * (banks as u16), base).await;
+                let banks = 1 << size;
+                self.dump_bank_prg(0x0, 0x4000 * banks, base).await;
             },
             4 => {
-                //banks = int_pow(2, prgsize) * 2;
+                let banks = (1u16 << size) * 2;
+                if banks > 256 {
+                    panic!("Address overflow");
+                }
                 self.write_prg_byte(0xA001, 0x80).await;  // Block Register - PRG RAM Chip Enable, Writable
                 for i in 0..banks {
                     self.write_prg_byte(0x8000, 0x06).await;  // PRG Bank 0 ($8000-$9FFF)
-                    self.write_prg_byte(0x8001, i).await;
-                    self.dump_bank_prg(0x0, 0x2000, 0x8000).await;
+                    self.write_prg_byte(0x8001, i as u8).await;
+                    self.dump_bank_prg(0x0, 0x2000, base).await;
                 }
             },
-            _ => {}
+            _ => {
+                finalize = false
+            }
+        }
+        if finalize {
+            self.set_address(0);
+            self.set_phy2_high();
+            self.set_romsel_high();
         }
     }
 
-    async fn read_chr(&mut self, mapper: u8, banks: u8) {
+    async fn read_chr(&mut self, mapper: u8, size: u8) {
         self.set_address(0);
         Timer::after_micros(1).await;
         match mapper {
@@ -367,10 +393,14 @@ impl<'d> DumperClass<'d>
                 self.dump_bank_chr(0x0, 0x2000).await;
             },
             4 => {
+                let banks = (1u16 << size) * 4;
+                if banks > 256 {
+                    panic!("Address overflow");
+                }
                 self.write_prg_byte(0xA001, 0x80).await;
                 for i in 0..banks {
                     self.write_prg_byte(0x8000, 0x02).await;
-                    self.write_prg_byte(0x8001, i).await;
+                    self.write_prg_byte(0x8001, i as u8).await;
                     self.dump_bank_chr(0x1000, 0x1400).await;
                 }                
             }

@@ -358,15 +358,15 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
-                Msg::DumpSetupData(mapper, prg_length, chr_length) => {
-                    Self::write_u32(buffer, &mut offset, ((prg_length + chr_length) as u32 * 1024 + 12 + 16).try_into().unwrap());
+                Msg::DumpSetupData {mapper, prg_length_16k, chr_length_8k} => {
+                    Self::write_u32(buffer, &mut offset, ((prg_length_16k as u32 * 16) + (chr_length_8k as u32 * 8)) * 1024 + 12 + 16);
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
                     Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetStorageIDs
                     Self::write_u32(buffer, &mut offset, transaction_id);
                     // 16 byte header
                     Self::write_buffer(buffer, &mut offset, &[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
-                    Self::write_u8(buffer, &mut offset, prg_length);
-                    Self::write_u8(buffer, &mut offset, chr_length);
+                    Self::write_u8(buffer, &mut offset, prg_length_16k);
+                    Self::write_u8(buffer, &mut offset, chr_length_8k);
                     Self::write_u8(buffer, &mut offset, (mapper & 0xF) << 4);
                     Self::write_buffer(buffer, &mut offset, &[0x00u8; 9]);
                 },
