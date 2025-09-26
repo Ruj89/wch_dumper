@@ -6,7 +6,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 pub const DATA_CHANNEL_SIZE: usize = 32;
 pub enum Msg {
     Start,
-    TotalLength(u8, u8),
+    DumpSetupData(u8, u8, u8),
     Data([u8; DATA_CHANNEL_SIZE]),
     End,
 }
@@ -142,15 +142,19 @@ impl<'d> DumperClass<'d>
         }
     }
 
-    //fn set_write_mode(&mut self) {
-    //    for pin in self.d.iter_mut() {
-    //        pin.set_as_output(Default::default());
-    //        pin.set_low();
-    //    }
-    //}
+    fn set_write_mode(&mut self) {
+        for pin in self.d.iter_mut() {
+            pin.set_as_output(Default::default());
+            pin.set_low();
+        }
+    }
 
     fn set_prg_read(&mut self){
         self.prg_rw.set_high();
+    }
+
+    fn set_prg_write(&mut self){
+        self.prg_rw.set_low();
     }
 
     fn set_romsel_low(&mut self){
@@ -173,9 +177,9 @@ impl<'d> DumperClass<'d>
         self.m2.set_high();
     }
 
-    //fn set_phy2_low(&mut self){
-    //    self.m2.set_low();
-    //}
+    fn set_phy2_low(&mut self){
+        self.m2.set_low();
+    }
 
     fn set_chr_read_high(&mut self){
         self.chr_rd.set_high();
@@ -191,6 +195,41 @@ impl<'d> DumperClass<'d>
             data |= (pin.is_high() as u8) << index; 
         }
         data
+    }
+
+    fn write_data(&mut self, data: u8){
+        for (index, pin) in self.d.iter_mut().enumerate() {
+            pin.set_level(Level::from((data & (1 << index)) > 0));
+        }
+    }
+
+    async fn write_prg_byte(&mut self, address: u16, data: u8) {
+        self.set_phy2_low();
+        self.set_romsel_high();
+        self.set_write_mode();
+        self.set_prg_write();
+        self.write_data(data);
+
+        self.set_address(address);  // PHI2 low, ROMSEL always HIGH
+        //  _delay_us(1);
+        self.set_phy2_high();
+        //_delay_us(10);
+        self.set_romsel(address);  // ROMSEL is low if need, PHI2 high
+        Timer::after_micros(1).await;  // WRITING
+        //_delay_ms(1); // WRITING
+        // PHI2 low, ROMSEL high
+        self.set_phy2_low();
+        Timer::after_micros(1).await;  // WRITING
+        self.set_romsel_high();
+        // Back to read mode
+        //  _delay_us(1);
+        self.set_prg_read();
+        self.set_read_mode();
+        self.set_address(0);
+        // Set phi2 to high state to keep cartridge unreseted
+        //  _delay_us(1);
+        self.set_phy2_high();
+        //  _delay_us(1);
     }
 
     async fn read_prg_byte(&mut self, address: u16) -> u8 {
@@ -264,24 +303,34 @@ impl<'d> DumperClass<'d>
         let ramlo = 0;
         let ramhi = 2;
 
+        let mapper = 4;
+        let prglo = 1;
+        let prghi = 5;
+        let chrlo = 0;
+        let chrhi = 6;
+        let ramlo = 0;
+        let ramhi = 1;
+
         let prgsize = 1;
         let chrsize = 1;
         let ramsize = 0;
         */
-        let prg_banks = 1;
+        let mapper = 4;
+        let prg_banks = 4;
+        let chr_banks = 5;
 
-        let prg = prg_banks * 16; // 2^prgsize * 16
-        let chr = 2 * 4; // 2^chrsize * 4
+        let prg = (1 << prg_banks) * 16; // 2^prgsize * 16
+        let chr = (1 << chr_banks) * 4; // 2^chrsize * 4
         //let ram = 0; // 0
 
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
                 Msg::Start => {
-                    self.out_channel.send(Msg::TotalLength(prg, chr)).await;
+                    self.out_channel.send(Msg::DumpSetupData(mapper, prg, chr)).await;
 
-                    self.read_prg(prg_banks).await;
-                    self.read_chr().await;
+                    self.read_prg(mapper, prg_banks).await;
+                    self.read_chr(mapper, chr_banks).await;
                     self.out_channel.send(Msg::End).await;
                 }
                 _ => {}
@@ -289,16 +338,43 @@ impl<'d> DumperClass<'d>
         }
     }
 
-    async fn read_prg(&mut self, banks: u8) {
+    async fn read_prg(&mut self, mapper: u8, banks: u8) {
         self.set_address(0);
         Timer::after_micros(1).await;
-        let base: u16 = 0x8000;
-        self.dump_bank_prg(0x0, 0x4000 * (banks as u16), base).await;
+        match mapper {
+            0 => {
+                let base: u16 = 0x8000;
+                self.dump_bank_prg(0x0, 0x4000 * (banks as u16), base).await;
+            },
+            4 => {
+                //banks = int_pow(2, prgsize) * 2;
+                self.write_prg_byte(0xA001, 0x80).await;  // Block Register - PRG RAM Chip Enable, Writable
+                for i in 0..banks {
+                    self.write_prg_byte(0x8000, 0x06).await;  // PRG Bank 0 ($8000-$9FFF)
+                    self.write_prg_byte(0x8001, i).await;
+                    self.dump_bank_prg(0x0, 0x2000, 0x8000).await;
+                }
+            },
+            _ => {}
+        }
     }
 
-    async fn read_chr(&mut self) {
+    async fn read_chr(&mut self, mapper: u8, banks: u8) {
         self.set_address(0);
         Timer::after_micros(1).await;
-        self.dump_bank_chr(0x0, 0x2000).await;
+        match mapper {
+            0 => {
+                self.dump_bank_chr(0x0, 0x2000).await;
+            },
+            4 => {
+                self.write_prg_byte(0xA001, 0x80).await;
+                for i in 0..banks {
+                    self.write_prg_byte(0x8000, 0x02).await;
+                    self.write_prg_byte(0x8001, i).await;
+                    self.dump_bank_chr(0x1000, 0x1400).await;
+                }                
+            }
+            _ => {}
+        }
     }
 }

@@ -358,7 +358,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
-                Msg::TotalLength(prg_length, chr_length) => {
+                Msg::DumpSetupData(mapper, prg_length, chr_length) => {
                     Self::write_u32(buffer, &mut offset, ((prg_length + chr_length) as u32 * 1024 + 12 + 16).try_into().unwrap());
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
                     Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetStorageIDs
@@ -367,7 +367,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                     Self::write_buffer(buffer, &mut offset, &[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
                     Self::write_u8(buffer, &mut offset, prg_length);
                     Self::write_u8(buffer, &mut offset, chr_length);
-                    Self::write_buffer(buffer, &mut offset, &[0x00u8; 10]);
+                    Self::write_u8(buffer, &mut offset, (mapper & 0xF) << 4);
+                    Self::write_buffer(buffer, &mut offset, &[0x00u8; 9]);
                 },
                 Msg::Data(data) => {
                     let buffer_write_size = core::cmp::min(data.len() ,self.max_packet_size() - offset);

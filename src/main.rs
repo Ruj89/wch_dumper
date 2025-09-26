@@ -151,7 +151,7 @@ async fn main(spawner: Spawner) -> ! {
     // ──────────────────────────────────────────────────────────────────────────────
     // Spawn async tasks
     // ──────────────────────────────────────────────────────────────────────────────
-    spawner.spawn(mtp_echo_task(mtp_class)).unwrap();
+    spawner.spawn(mtp_task(mtp_class)).unwrap();
     spawner.spawn(usb_device_task(usb_device)).unwrap();
     spawner.spawn(rom_read_task(dumper)).unwrap();
 
@@ -170,7 +170,7 @@ async fn usb_device_task(mut device: UsbDevice<'static, Driver<'static, OTG_FS, 
 /// Very small demo: wait for the host to open the interface and then echo what we
 /// receive back to the host.
 #[task]
-async fn mtp_echo_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>) {
+async fn mtp_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>) {
     // Block until the host has configured the interface.
     mtp.wait_connection().await;
 
