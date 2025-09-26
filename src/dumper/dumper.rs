@@ -82,7 +82,7 @@ impl<'d> DumperClass<'d>
         let chr_rd = Output::new(chr_rd_pin, Level::High, Default::default());
         Input::new(irq_pin, Pull::Up); // let irq = 
         let prg_rw = Output::new(prg_rw_pin, Level::High, Default::default());
-        
+
         let a = [
             Output::new(a_pins.0, Level::Low, Default::default()),
             Output::new(a_pins.1, Level::Low, Default::default()),
@@ -146,7 +146,7 @@ impl<'d> DumperClass<'d>
         }
     }
 
-    fn set_mode_write(&mut self) {
+    fn set_write_mode(&mut self) {
         for pin in self.d.iter_mut() {
             pin.set_as_output(Default::default());
             pin.set_low();
@@ -172,7 +172,7 @@ impl<'d> DumperClass<'d>
     fn set_romsel(&mut self, address: u16) {
     if address & 0x8000 > 0 {
         self.set_romsel_low();
-    } else {    
+    } else {
         self.set_romsel_high();
     }
     }
@@ -210,7 +210,7 @@ impl<'d> DumperClass<'d>
     async fn write_prg_byte(&mut self, address: u16, data: u8) {
         self.set_phy2_low();
         self.set_romsel_high();
-        self.set_mode_write();
+        self.set_write_mode();
         self.set_prg_write();
         self.write_data(data);
 
@@ -289,7 +289,7 @@ impl<'d> DumperClass<'d>
         for dpin in &mut self.d {
             dpin.set_as_input(Pull::Up);
         }
-        
+
         /*
         let crc32 =    unsafe { &mut *CRC32.0.get() };
         let crc32_mmc3 =    unsafe { &mut *CRC32_MMC3.0.get() };
@@ -314,28 +314,28 @@ impl<'d> DumperClass<'d>
         let chrhi = 6;
         let ramlo = 0;
         let ramhi = 1;
-
+        */
+        /*
         let mapper = 0;
         let prgsize = 1;
         let chrsize = 1;
-        let ramsize = 0;
         let prg = 32; // KB
         let chr = 8; // KB
-
+        */
+        /*
         let mapper = 0;
         let prgsize = 0;
         let chrsize = 1;
-        let ramsize = 0;
         let prg = 16; // KB
         let chr = 8; // KB
         */
-        
+        // /*
         let mapper = 4;
         let prgsize = 4;
         let chrsize = 5;
         let prg: u16 = 256; // KB
         let chr: u16 = 128; // KB
-        //let ram = 0; // 0
+        // */
 
         let receiver = self.in_channel.receiver();
         loop {
@@ -344,7 +344,9 @@ impl<'d> DumperClass<'d>
                     self.out_channel.send(Msg::DumpSetupData{mapper, prg_length_16k: (prg / 16) as u8, chr_length_8k: (chr / 8) as u8}).await;
 
                     self.read_prg(mapper, prgsize).await;
-                    self.read_chr(mapper, chrsize).await;
+                    if chrsize > 0 {
+                        self.read_chr(mapper, chrsize).await;
+                    }
                     self.out_channel.send(Msg::End).await;
                 }
                 _ => {}
@@ -402,7 +404,7 @@ impl<'d> DumperClass<'d>
                     self.write_prg_byte(0x8000, 0x02).await;
                     self.write_prg_byte(0x8001, i as u8).await;
                     self.dump_bank_chr(0x1000, 0x1400).await;
-                }                
+                }
             }
             _ => {}
         }

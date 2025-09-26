@@ -359,7 +359,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         loop {
             match receiver.receive().await {
                 Msg::DumpSetupData {mapper, prg_length_16k, chr_length_8k} => {
-                    Self::write_u32(buffer, &mut offset, ((prg_length_16k as u32 * 16) + (chr_length_8k as u32 * 8)) * 1024 + 12 + 16);
+                    Self::write_u32(buffer, &mut offset, (((prg_length_16k as u32 * 16) + (chr_length_8k as u32 * 8)) * 1024) + 12 + 16);
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
                     Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetStorageIDs
                     Self::write_u32(buffer, &mut offset, transaction_id);
@@ -373,20 +373,19 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Msg::Data(data) => {
                     let buffer_write_size = core::cmp::min(data.len() ,self.max_packet_size() - offset);
                     Self::write_buffer(buffer, &mut offset, &data[..buffer_write_size]);
-                    if offset == self.max_packet_size() {
-                        match self.write_packet(&buffer).await {
-                            Ok(_) => {
-                                Timer::after_millis(1).await;
-                                offset = 0;
-                                if buffer_write_size != data.len() {
-                                    Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
+                        if offset == self.max_packet_size() {
+                            offset = 0;
+                            match self.write_packet(&buffer[..self.max_packet_size()]).await {
+                                Ok(_) => {
+                                    if buffer_write_size != data.len() {
+                                        Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
+                                    }
                                 }
-                            }
-                            _ => {
-                                // Allow the USB stack some breathing room; not strictly required
-                                // but avoids busy‑looping if the host stalls communication.
-                                Timer::after_millis(1).await;
-                                break;
+                                _ => {
+                                    // Allow the USB stack some breathing room; not strictly required
+                                    // but avoids busy‑looping if the host stalls communication.
+                                    Timer::after_millis(1).await;
+                                    break;
                             }
                         }
                     }
@@ -394,6 +393,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Msg::End => {
                     if offset > 0 {
                         match self.write_packet(&buffer[..offset]).await {
+                            Ok(_) => {},
                             _ => {
                                 // Allow the USB stack some breathing room; not strictly required
                                 // but avoids busy‑looping if the host stalls communication.
@@ -403,6 +403,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                     }
                     if offset % 64 == 0 {
                         match self.write_packet(&[]).await {
+                            Ok(_) => {},
                             _ => {
                                 // Allow the USB stack some breathing room; not strictly required
                                 // but avoids busy‑looping if the host stalls communication.
