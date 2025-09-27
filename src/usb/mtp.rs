@@ -371,21 +371,21 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                     Self::write_buffer(buffer, &mut offset, &[0x00u8; 9]);
                 },
                 Msg::Data(data) => {
-                    let buffer_write_size = core::cmp::min(data.len() ,self.max_packet_size() - offset);
+                    let buffer_write_size = core::cmp::min(data.len(), self.max_packet_size() - 1 - offset);
                     Self::write_buffer(buffer, &mut offset, &data[..buffer_write_size]);
-                        if offset == self.max_packet_size() {
-                            offset = 0;
-                            match self.write_packet(&buffer[..self.max_packet_size()]).await {
-                                Ok(_) => {
-                                    if buffer_write_size != data.len() {
-                                        Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
-                                    }
+                    if offset == self.max_packet_size() - 1 {
+                        offset = 0;
+                        match self.write_packet(&buffer[..self.max_packet_size() - 1]).await {
+                            Ok(_) => {
+                                if buffer_write_size != data.len() {
+                                    Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
                                 }
-                                _ => {
-                                    // Allow the USB stack some breathing room; not strictly required
-                                    // but avoids busy‑looping if the host stalls communication.
-                                    Timer::after_millis(1).await;
-                                    break;
+                            }
+                            _ => {
+                                // Allow the USB stack some breathing room; not strictly required
+                                // but avoids busy‑looping if the host stalls communication.
+                                Timer::after_millis(1).await;
+                                break;
                             }
                         }
                     }
@@ -427,7 +427,6 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             let chunk = &buf[offset..end];
             match self.write_packet(&chunk).await {
                 Ok(_) => {
-                    Timer::after_millis(1).await;
                 }
                 _ => {
                     // Allow the USB stack some breathing room; not strictly required
