@@ -244,7 +244,7 @@ impl<'d> DumperClass<'d>
         self.set_phy2_high();
         self.set_romsel(address);
         Timer::after_micros(1).await;
-        self.read_data()
+        Self::retry_read::<_,10>(|| self.read_data())
     }
 
     async fn read_chr_byte(&mut self, address: u16) -> u8 {
@@ -254,9 +254,38 @@ impl<'d> DumperClass<'d>
         self.set_address(address);
         self.set_chr_read_low();
         Timer::after_micros(1).await;
-        let result = self.read_data();
+        let result = Self::retry_read::<_,10>(|| self.read_data());
         self.set_chr_read_high();
         result
+    }
+
+    fn retry_read<F, const N: usize>(mut f: F) -> u8
+    where
+        F: FnMut() -> u8,
+    {
+        let mut values = [0u8; N];
+
+        for i in 0..N {
+            values[i] = f();
+        }
+
+        let mut best_val = values[0];
+        let mut best_count = 1;
+
+        for i in 0..N {
+            let mut count = 1;
+            for j in (i + 1)..N {
+                if values[j] == values[i] {
+                    count += 1;
+                }
+            }
+            if count > best_count {
+                best_count = count;
+                best_val = values[i];
+            }
+        }
+
+        best_val
     }
 
     async fn dump_prg(&mut self, base: u16, address: u16) {
