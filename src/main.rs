@@ -72,8 +72,8 @@ async fn main(spawner: Spawner) -> ! {
     
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0x6666, 0xcafe);
-    config.manufacturer = Some("Embassy");
-    config.product = Some("USB MTP Demo");
+    config.manufacturer = Some("arkHive");
+    config.product = Some("MTP Dumper");
     config.serial_number = Some("12345678");
     config.max_power = 100;
     config.max_packet_size_0 = 64;

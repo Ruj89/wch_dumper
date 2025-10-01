@@ -241,8 +241,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         for playback in supported_playbacks  {
             Self::write_u16(buffer, &mut offset, playback); // PlaybackSupported
         }
-        Self::write_string(buffer, &mut offset, "MyCompany"); // Manufacturer
-        Self::write_string(buffer, &mut offset, "MTP"); // Model
+        Self::write_string(buffer, &mut offset, "arkHive"); // Manufacturer
+        Self::write_string(buffer, &mut offset, "MTP Dumper"); // Model
         Self::write_string(buffer, &mut offset, "1.0"); // DeviceVersion
         Self::write_string(buffer, &mut offset, "12345678"); // SerialNumber
         let total_len = offset as u32;
