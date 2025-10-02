@@ -148,8 +148,8 @@ impl<'d> DumperClass<'d>
 
     fn set_write_mode(&mut self) {
         for pin in self.d.iter_mut() {
-            pin.set_as_output(Default::default());
             pin.set_low();
+            pin.set_as_output(Default::default());
         }
     }
 
@@ -215,25 +215,25 @@ impl<'d> DumperClass<'d>
         self.write_data(data);
 
         self.set_address(address);  // PHI2 low, ROMSEL always HIGH
-        //  _delay_us(1);
+        // Timer::after_micros(1).await; //  _delay_us(1);
         self.set_phy2_high();
-        //_delay_us(10);
+        // Timer::after_micros(10).await; //_delay_us(10);
         self.set_romsel(address);  // ROMSEL is low if need, PHI2 high
         Timer::after_micros(1).await;  // WRITING
-        //_delay_ms(1); // WRITING
+        // Timer::after_millis(1).await; //_delay_ms(1); // WRITING
         // PHI2 low, ROMSEL high
         self.set_phy2_low();
         Timer::after_micros(1).await;  // WRITING
         self.set_romsel_high();
         // Back to read mode
-        //  _delay_us(1);
+        // Timer::after_micros(1).await; //  _delay_us(1);
         self.set_prg_read();
         self.set_mode_read();
         self.set_address(0);
         // Set phi2 to high state to keep cartridge unreseted
-        //  _delay_us(1);
+        // Timer::after_micros(1).await; //  _delay_us(1);
         self.set_phy2_high();
-        //  _delay_us(1);
+        // Timer::after_micros(1).await; //  _delay_us(1);
     }
 
     async fn read_prg_byte(&mut self, address: u16) -> u8 {
@@ -244,7 +244,7 @@ impl<'d> DumperClass<'d>
         self.set_phy2_high();
         self.set_romsel(address);
         Timer::after_micros(1).await;
-        Self::retry_read::<_,10>(|| self.read_data())
+        Self::retry_read::<_,10>(|| self.read_data()).await
     }
 
     async fn read_chr_byte(&mut self, address: u16) -> u8 {
@@ -254,12 +254,12 @@ impl<'d> DumperClass<'d>
         self.set_address(address);
         self.set_chr_read_low();
         Timer::after_micros(1).await;
-        let result = Self::retry_read::<_,10>(|| self.read_data());
+        let result = Self::retry_read::<_,10>(|| self.read_data()).await;
         self.set_chr_read_high();
         result
     }
 
-    fn retry_read<F, const N: usize>(mut f: F) -> u8
+    async fn retry_read<F, const N: usize>(mut f: F) -> u8
     where
         F: FnMut() -> u8,
     {
@@ -267,6 +267,7 @@ impl<'d> DumperClass<'d>
 
         for i in 0..N {
             values[i] = f();
+            Timer::after_micros(1).await;
         }
 
         let mut best_val = values[0];
