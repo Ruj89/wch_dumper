@@ -4,6 +4,8 @@ use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 pub const DATA_CHANNEL_SIZE: usize = 32;
+pub const BYTE_READ_RETRIES: usize = 1;
+
 pub enum Msg {
     Start,
     DumpSetupData{
@@ -244,7 +246,7 @@ impl<'d> DumperClass<'d>
         self.set_phy2_high();
         self.set_romsel(address);
         Timer::after_micros(1).await;
-        Self::retry_read::<_,10>(|| self.read_data()).await
+        Self::retry_read::<_,BYTE_READ_RETRIES>(|| self.read_data()).await
     }
 
     async fn read_chr_byte(&mut self, address: u16) -> u8 {
@@ -254,7 +256,7 @@ impl<'d> DumperClass<'d>
         self.set_address(address);
         self.set_chr_read_low();
         Timer::after_micros(1).await;
-        let result = Self::retry_read::<_,10>(|| self.read_data()).await;
+        let result = Self::retry_read::<_,BYTE_READ_RETRIES>(|| self.read_data()).await;
         self.set_chr_read_high();
         result
     }
