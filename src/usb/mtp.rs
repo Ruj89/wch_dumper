@@ -5,6 +5,7 @@ use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointO
 use embassy_usb::{Builder};
 use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use serde::{Serialize, Deserialize};
 
 use crate::dumper::dumper::Msg;
 
@@ -27,6 +28,15 @@ pub enum MtpError {
     WrongPacketType
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DumperConfig {
+    pub mapper: u8,
+    pub prgsize: u8,
+    pub chrsize: u8,
+    pub prg: u16, // KB
+    pub chr: u16, // KB
+}
+
 /// Packet level implementation of a MTP serial port.
 ///
 /// This class can be used directly and it has the least overhead due to directly reading and
@@ -45,6 +55,9 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     write_ep: D::EndpointIn,
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+    configuration_file: &'d[u8],
+    configuration_file_size: usize,
+    dumper_config: DumperConfig,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
@@ -53,7 +66,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     pub fn new(builder: &mut Builder<'d, D>, 
         max_packet_size: u16,
         in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-        out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,) -> Self {
+        out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
+        configuration_file: &'d mut [u8]) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
@@ -64,13 +78,26 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         //let comm_ep = alt.endpoint_interrupt_in(8, 255);
 
         drop(func);
+        
 
+        let config = DumperConfig {
+            mapper: 4,
+            prgsize: 4,
+            chrsize: 5,
+            prg: 256,
+            chr: 128
+        };
+        
+        let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
         MtpClass {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
             in_channel,
             out_channel,
+            configuration_file,
+            configuration_file_size,
+            dumper_config: config
         }
     }
 
@@ -276,7 +303,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let mut offset = 12;
         Self::write_u16(buffer, &mut offset, 0x0004); // Storage Type = Removable RAM
         Self::write_u16(buffer, &mut offset, 0x0002); // Filesystem Type = Generic hierarchical
-        Self::write_u16(buffer, &mut offset, 0x0001); // Access Capability = Read-only without object deletion
+        Self::write_u16(buffer, &mut offset, 0x0000); // Access Capability = Read-only without object deletion
         Self::write_u64(buffer, &mut offset, u64::max_value()); // Max Capacity > TB
         Self::write_u64(buffer, &mut offset, 0); // Free Space In Bytes
         Self::write_u32(buffer, &mut offset, 0xFFFFFFFF); // *Free Space In Objects = Not used
@@ -401,7 +428,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0000); // Protection Status
-                Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
+                Self::write_u32(buffer, &mut offset, self.configuration_file_size as u32); // Object Compressed Size
                 Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
                 Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
                 Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
@@ -431,11 +458,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
     
-    async fn generate_object_response<'a>(&mut self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
-        let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
-        if object_handle != 0x00000001 {
-            return 0;
-        }
+    async fn generate_nes_rom_object_response(&mut self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let mut offset = 0;
         self.out_channel.send(Msg::Start).await;
         let receiver = self.in_channel.receiver();
@@ -503,6 +526,34 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }     
 
         0
+    }
+
+    fn generate_config_json_object_response(&mut self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+        let mut offset = 12;
+        Self::write_buffer(buffer, &mut offset, &self.configuration_file[0..self.configuration_file_size]); // File content
+        
+        let total_len = offset as u32;
+        Self::write_u32(buffer, &mut 0, total_len);
+        Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data
+        Self::write_u16(buffer, &mut 6, 0x1009);    // Operation: GetStorageIDs
+        Self::write_u32(buffer, &mut 8, transaction_id);
+
+        offset
+    }
+
+    async fn generate_object_response<'a>(&mut self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
+        let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        match object_handle {
+            0x00000002 => {
+                self.generate_nes_rom_object_response(transaction_id, buffer).await
+            }
+            0x00000003 => {
+                self.generate_config_json_object_response(transaction_id, buffer)
+            }
+            _ => {
+                0
+            }
+        }
     }
 
     async fn write_response_buffer(&mut self, buf: &[u8], len: usize) {
