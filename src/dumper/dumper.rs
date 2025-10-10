@@ -13,8 +13,20 @@ pub enum Msg {
         prg_length_16k: u8,
         chr_length_8k: u8,
     },
+    DumpSetupDataChanged {
+        field: [u8;DATA_CHANNEL_SIZE/2],
+        value: [u8;DATA_CHANNEL_SIZE/2],
+    },
     Data([u8; DATA_CHANNEL_SIZE]),
     End,
+}
+
+pub struct DumperConfig {
+    pub mapper: u8,
+    pub prgsize: u8,
+    pub chrsize: u8,
+    pub prg: u16, // KB
+    pub chr: u16, // KB
 }
 
 
@@ -361,25 +373,54 @@ impl<'d> DumperClass<'d>
         let prg = 16; // KB
         let chr = 8; // KB
         */
-        // /*
-        let mapper = 4;
-        let prgsize = 4;
-        let chrsize = 5;
-        let prg: u16 = 256; // KB
-        let chr: u16 = 128; // KB
-        // */
+        /*
+        let mut mapper: u8 = 4;
+        let mut prgsize: u8 = 4;
+        let mut chrsize: u8 = 5;
+        let mut prg: u16 = 256; // KB
+        let mut chr: u16 = 128; // KB
+        */
+
+        let mut config = DumperConfig {
+            mapper: 4,
+            prgsize: 4,
+            chrsize: 5,
+            prg: 256,
+            chr: 128
+        }; 
 
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
                 Msg::Start => {
-                    self.out_channel.send(Msg::DumpSetupData{mapper, prg_length_16k: (prg / 16) as u8, chr_length_8k: (chr / 8) as u8}).await;
+                    self.out_channel.send(Msg::DumpSetupData{ mapper: config.mapper, prg_length_16k: (config.prg / 16) as u8, chr_length_8k: (config.chr / 8) as u8}).await;
 
-                    self.read_prg(mapper, prgsize).await;
-                    if chrsize > 0 {
-                        self.read_chr(mapper, chrsize).await;
+                    self.read_prg(config.mapper, config.prgsize).await;
+                    if config.chrsize > 0 {
+                        self.read_chr(config.mapper, config.chrsize).await;
                     }
                     self.out_channel.send(Msg::End).await;
+                }
+                Msg::DumpSetupDataChanged { field, value } => {
+                    let field_encoded = str::from_utf8(&field).unwrap();
+                    match field_encoded {
+                        "mapper" => {
+                            config.mapper = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+                        } 
+                        "prgsize" => {
+                            config.prgsize = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+                        } 
+                        "chrsize" => {
+                            config.chrsize = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+                        } 
+                        "prg" => {
+                            config.prg = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+                        } 
+                        "chr" => {
+                            config.chr = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+                        } 
+                        _ => {}
+                    }
                 }
                 _ => {}
             }
