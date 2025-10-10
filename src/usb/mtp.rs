@@ -274,11 +274,11 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }
 
         let mut offset = 12;
-        Self::write_u16(buffer, &mut offset, 0x0002); // Storage Type = Removable ROM
+        Self::write_u16(buffer, &mut offset, 0x0004); // Storage Type = Removable RAM
         Self::write_u16(buffer, &mut offset, 0x0002); // Filesystem Type = Generic hierarchical
         Self::write_u16(buffer, &mut offset, 0x0001); // Access Capability = Read-only without object deletion
-        Self::write_u64(buffer, &mut offset, u64::max_value()); // 1MB
-        Self::write_u64(buffer, &mut offset, 0);   
+        Self::write_u64(buffer, &mut offset, u64::max_value()); // Max Capacity > TB
+        Self::write_u64(buffer, &mut offset, 0); // Free Space In Bytes
         Self::write_u32(buffer, &mut offset, 0xFFFFFFFF); // *Free Space In Objects = Not used
         Self::write_string(buffer, &mut offset, "ROMs"); // Storage Description
         Self::write_string(buffer, &mut offset, ""); // Volume Identifier
@@ -292,18 +292,56 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
+    fn object_format_codes_contains(cmd: &PtpCommand, needle: u16) -> bool {
+        let object_format_code_count= u32::from_le_bytes([cmd.payload[4], cmd.payload[5], cmd.payload[6], cmd.payload[7]]);
+        if object_format_code_count == 0 {
+            return true;
+        }
+        let object_format_code_offset = 8;
+        for object_format_code_index in 0..object_format_code_count {
+            let buffer_index = object_format_code_offset + (object_format_code_index * 2) as usize;
+            let object_format_code = u16::from_le_bytes([cmd.payload[buffer_index], cmd.payload[buffer_index+1]]);
+            if object_format_code == needle {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn object_handle_of_association_contains(cmd: &PtpCommand, needle: u32) -> bool {
+        let object_format_code_count= u32::from_le_bytes([cmd.payload[4], cmd.payload[5], cmd.payload[6], cmd.payload[7]]);
+        let object_format_code_offset = 8;
+        let object_handle_of_association_offset = object_format_code_offset + (object_format_code_count * 2) as usize;
+        let object_handle_of_association= u32::from_le_bytes([cmd.payload[object_handle_of_association_offset], 
+                                                                   cmd.payload[object_handle_of_association_offset+1], 
+                                                                   cmd.payload[object_handle_of_association_offset+2], 
+                                                                   cmd.payload[object_handle_of_association_offset+3]]);
+        if object_handle_of_association == 0 {
+            return true;
+        }
+        return needle == object_handle_of_association;
+    }
+
     fn generate_object_handles_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let mut offset = 12;
         let storage_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
-        if storage_id == 0xFFFFFFFF {
-            Self::write_u32(buffer, &mut offset, 1); // NumObjectHandles
-            Self::write_u32(buffer, &mut offset, 0x00000002); // ObjectHandle[0] id
-        } else if storage_id == 0x00010001 {
-            Self::write_u32(buffer, &mut offset, 1); // NumObjectHandles
-            Self::write_u32(buffer, &mut offset, 0x00000001); // ObjectHandle[0] id
-        } else {
-            Self::write_u32(buffer, &mut offset, 0); // NumObjectHandles
+        let mut object_handle_offset = offset;
+        offset += 4;
+        let mut object_handle_count = 0;
+        if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) && 
+            Self::object_format_codes_contains(cmd, 0x3001) && 
+            Self::object_handle_of_association_contains(cmd, 0xFFFFFFFF) {
+                Self::write_u32(buffer, &mut offset, 0x00000001); // ObjectHandle[0] id
+                object_handle_count += 1;
         }
+        if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) && 
+            Self::object_format_codes_contains(cmd, 0x3000) && 
+            Self::object_handle_of_association_contains(cmd, 0x00000001) {
+                Self::write_u32(buffer, &mut offset, 0x00000002); // ObjectHandle[0] id
+                Self::write_u32(buffer, &mut offset, 0x00000003); // ObjectHandle[0] id
+                object_handle_count += 2;
+        }
+        Self::write_u32(buffer, &mut object_handle_offset, object_handle_count); // NumObjectHandles
         let total_len = offset as u32;
         Self::write_u32(buffer, &mut 0, total_len);
         Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data
@@ -315,30 +353,75 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
     fn generate_object_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
-        if object_handle != 0x00000001 {
-            return 0;
-        }
         let mut offset = 12;
-        Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
-        Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
-        Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
-        Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
-        Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
-        Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
-        Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
-        Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
-        Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
-        Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
-        Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
-        Self::write_u32(buffer, &mut offset, 0x00000000); // Parent Object
-        Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
-        Self::write_u32(buffer, &mut offset, 0); // Association Description
-        Self::write_u32(buffer, &mut offset, 0); // Sequence Number
-        Self::write_string(buffer, &mut offset, "rom.nes"); // Filename
-        Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
-        Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
-        Self::write_string(buffer, &mut offset, "0"); // Keywords
-        
+        match object_handle  {
+            0x00000001 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3001); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000000); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "NES"); // Filename
+                Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+            0x00000002 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000001); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "rom.nes"); // Filename
+                Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+            0x00000003 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0000); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000001); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "config.json"); // Filename
+                Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+            _ => {
+                return 0;
+            }
+        }
         let total_len = offset as u32;
         Self::write_u32(buffer, &mut 0, total_len);
         Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data
@@ -359,9 +442,11 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         loop {
             match receiver.receive().await {
                 Msg::DumpSetupData {mapper, prg_length_16k, chr_length_8k} => {
-                    Self::write_u32(buffer, &mut offset, (((prg_length_16k as u32 * 16) + (chr_length_8k as u32 * 8)) * 1024) + 12 + 16);
+                    Self::write_u32(buffer, &mut offset, (((prg_length_16k as u32 * 16) + 
+                                                                    (chr_length_8k as u32 * 8)) * 1024) + 
+                                                                    12 + 16);
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
-                    Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetStorageIDs
+                    Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetObject
                     Self::write_u32(buffer, &mut offset, transaction_id);
                     // 16 byte header
                     Self::write_buffer(buffer, &mut offset, &[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
