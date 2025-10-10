@@ -57,6 +57,7 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     configuration_file: &'d[u8],
     configuration_file_size: usize,
+    configuration_file_deleted: bool,
     dumper_config: DumperConfig,
 }
 
@@ -80,7 +81,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         drop(func);
         
 
-        let config = DumperConfig {
+        let dumper_config = DumperConfig {
             mapper: 4,
             prgsize: 4,
             chrsize: 5,
@@ -88,7 +89,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             chr: 128
         };
         
-        let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
+        let configuration_file_size = serde_json_core::to_slice(&dumper_config, configuration_file).unwrap();
         MtpClass {
             //_comm_ep: comm_ep,
             read_ep,
@@ -97,7 +98,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             out_channel,
             configuration_file,
             configuration_file_size,
-            dumper_config: config
+            configuration_file_deleted: false,
+            dumper_config
         }
     }
 
@@ -365,8 +367,11 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             Self::object_format_codes_contains(cmd, 0x3000) && 
             Self::object_handle_of_association_contains(cmd, 0x00000001) {
                 Self::write_u32(buffer, &mut offset, 0x00000002); // ObjectHandle[0] id
-                Self::write_u32(buffer, &mut offset, 0x00000003); // ObjectHandle[0] id
-                object_handle_count += 2;
+                object_handle_count += 1;
+                if !self.configuration_file_deleted {
+                    Self::write_u32(buffer, &mut offset, 0x00000003); // ObjectHandle[0] id
+                    object_handle_count += 1;
+                }
         }
         Self::write_u32(buffer, &mut object_handle_offset, object_handle_count); // NumObjectHandles
         let total_len = offset as u32;
@@ -556,6 +561,14 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }
     }
 
+    fn generate_delete_object_response<'a>(&mut self, cmd: &PtpCommand<'a>) -> usize {
+        let object_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        if object_id == 0x00000003 || object_id == 0xFFFFFFFF {
+            self.configuration_file_deleted = true;
+        }
+        0
+    }
+
     async fn write_response_buffer(&mut self, buf: &[u8], len: usize) {
         let mut offset = 0;
         while offset < len {
@@ -607,6 +620,9 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             0x1009 => {
                 len = self.generate_object_response(cmd.transaction_id, &mut buf, &cmd).await;
             }
+            0x100b => {
+                len = self.generate_delete_object_response(&cmd);
+            }
             _ => {
                 len = 0;
             }
@@ -643,6 +659,9 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
             }
             0x1009 => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
+            0x100b => {
                 len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
             }
             _ => {
