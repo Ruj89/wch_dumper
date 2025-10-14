@@ -42,7 +42,7 @@ enum MtpCommandError {
     // StoreFull = 0x200C,
     // StoreReadOnly = 0x200E,
     // AccessDenied = 0x200F,
-    // StoreNotAvailable = 0x2013,
+    StoreNotAvailable = 0x2013,
     InvalidParentObject = 0x201A,
     ObjectTooLarge = 0xA809,
 }
@@ -107,13 +107,15 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
         drop(func);
 
-        let configuration_file_size = serde_json_core::to_slice(&DumperConfig {
+        let config = DumperConfig {
             mapper: 4,
             prgsize: 4,
             chrsize: 5,
             prg: 256,
             chr: 128
-        }, configuration_file).unwrap();
+        };
+
+        let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
         MtpClass {
             //_comm_ep: comm_ep,
             read_ep,
@@ -122,7 +124,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             out_channel,
             configuration_file,
             configuration_file_size,
-            configuration_file_deleted: false
+            configuration_file_deleted: false,
         }
     }
 
@@ -224,31 +226,21 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     fn generate_ok_response_block(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
-        let length = 12u32.to_le_bytes();
-        let packet_type = (MtpContainerType::Response as u16).to_le_bytes();       // Response Block
-        let response_code = (MtpCommandError::Ok as u16).to_le_bytes();     // OK
-        let tx_id = transaction_id.to_le_bytes();
-
-        buffer[0..4].copy_from_slice(&length);
-        buffer[4..6].copy_from_slice(&packet_type);
-        buffer[6..8].copy_from_slice(&response_code);
-        buffer[8..12].copy_from_slice(&tx_id);
-
-        12
+        let mut offset = 0;
+        Self::write_u32(buffer, &mut offset, 12u32);
+        Self::write_u16(buffer, &mut offset, MtpContainerType::Response as u16);
+        Self::write_u16(buffer, &mut offset, MtpCommandError::Ok as u16);
+        Self::write_u32(buffer, &mut offset, transaction_id);
+        offset
     }
 
-    fn generate_error_response_block(&self, transaction_id: u32, buffer: &mut [u8], error: u16) -> usize {
-        let length = 12u32.to_le_bytes();
-        let packet_type = 0x0003u16.to_le_bytes();       // Response Block
-        let response_code = error.to_le_bytes();     // OK
-        let tx_id = transaction_id.to_le_bytes();
-
-        buffer[0..4].copy_from_slice(&length);
-        buffer[4..6].copy_from_slice(&packet_type);
-        buffer[6..8].copy_from_slice(&response_code);
-        buffer[8..12].copy_from_slice(&tx_id);
-
-        12
+    fn generate_error_response_block(&self, transaction_id: u32, buffer: &mut [u8], error: MtpCommandError) -> usize {
+        let mut offset = 0;
+        Self::write_u32(buffer, &mut offset, 12u32);
+        Self::write_u16(buffer, &mut offset, MtpContainerType::Response as u16);
+        Self::write_u16(buffer, &mut offset, error as u16);
+        Self::write_u32(buffer, &mut offset, transaction_id);
+        offset
     }
 
     fn generate_device_info_response(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
@@ -277,7 +269,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             Self::write_u16(buffer, &mut offset, event); // EventSupported
         }
         let supported_device_properties = [
-            0xd401, 0xd402, /* 0x5003, 0x5001, */0xd407, 0xd406
+            0xd401, 0xd402, 0x5002, 0x5011,
         ];
         Self::write_u32(buffer, &mut offset, supported_device_properties.len().try_into().unwrap()); // NumDevicePropertiesSupported
         for device_property in supported_device_properties  {
@@ -645,7 +637,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                                 buffer[0..4].copy_from_slice(&length);
                                 offset
                             },
-                            Err(error) => {self.generate_error_response_block(cmd.transaction_id, buffer, error as u16)},
+                            Err(error) => {self.generate_error_response_block(cmd.transaction_id, buffer, error)},
                         }
                     }
                     _ => {
@@ -687,7 +679,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                                 self.configuration_file.fill(0);
                                 self.configuration_file_size = core::cmp::min(cmd.payload.len(), self.configuration_file.len());
                                 self.configuration_file[..self.configuration_file_size].copy_from_slice(&cmd.payload[..self.configuration_file_size]);
-                                match serde_json_core::from_slice(&self.configuration_file[..self.configuration_file_size]) {
+                                match serde_json_core::from_slice::<DumperConfig>(&self.configuration_file[..self.configuration_file_size]) {
                                     Ok((config, _)) => {
                                         self.send_updated_dumper_config(&config).await;
                                     }
@@ -789,7 +781,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             }
             0x1005 => {
                 if len == 0 {
-                    len = self.generate_error_response_block(cmd.transaction_id, &mut buf, 0x2013);
+                    len = self.generate_error_response_block(cmd.transaction_id, &mut buf, MtpCommandError::StoreNotAvailable);
                 } else {
                     len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
                 }
