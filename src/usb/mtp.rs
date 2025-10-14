@@ -1,5 +1,7 @@
 //! MTP class implementation.
 
+use core::iter;
+
 use embassy_time::Timer;
 use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
 use embassy_usb::{Builder};
@@ -26,6 +28,32 @@ pub struct PtpCommand<'a> {
 pub enum MtpError {
     CannotParseHeader,
     WrongPacketType
+}
+
+#[repr(u16)]
+enum MtpCommandError {
+    Ok = 0x2001,
+    // SessionNotOpen = 0x2003,
+    // InvalidTransactionId = 0x2004,
+    OperationNotSupported = 0x2005,
+    // ParameterNotSupported = 0x2006,
+    // InvalidStorageId = 0x2008,
+    InvalidObjectFormatCode = 0x200B,
+    // StoreFull = 0x200C,
+    // StoreReadOnly = 0x200E,
+    // AccessDenied = 0x200F,
+    // StoreNotAvailable = 0x2013,
+    InvalidParentObject = 0x201A,
+    ObjectTooLarge = 0xA809,
+}
+
+#[repr(u16)]
+pub enum MtpContainerType {
+    // Undefined = 0x0000,
+    Command = 0x0001,
+    Data = 0x0002,
+    Response = 0x0003,
+    // Event = 0x0004,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -55,16 +83,15 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     write_ep: D::EndpointIn,
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-    configuration_file: &'d[u8],
+    configuration_file: &'d mut [u8],
     configuration_file_size: usize,
     configuration_file_deleted: bool,
-    dumper_config: DumperConfig,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     /// Creates a new MtpClass with the provided UsbBus and `max_packet_size` in bytes. For
     /// full-speed devices, `max_packet_size` has to be one of 8, 16, 32 or 64.
-    pub fn new(builder: &mut Builder<'d, D>, 
+    pub fn new(builder: &mut Builder<'d, D>,
         max_packet_size: u16,
         in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
@@ -79,17 +106,14 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         //let comm_ep = alt.endpoint_interrupt_in(8, 255);
 
         drop(func);
-        
 
-        let dumper_config = DumperConfig {
+        let configuration_file_size = serde_json_core::to_slice(&DumperConfig {
             mapper: 4,
             prgsize: 4,
             chrsize: 5,
             prg: 256,
             chr: 128
-        };
-        
-        let configuration_file_size = serde_json_core::to_slice(&dumper_config, configuration_file).unwrap();
+        }, configuration_file).unwrap();
         MtpClass {
             //_comm_ep: comm_ep,
             read_ep,
@@ -98,8 +122,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             out_channel,
             configuration_file,
             configuration_file_size,
-            configuration_file_deleted: false,
-            dumper_config
+            configuration_file_deleted: false
         }
     }
 
@@ -125,17 +148,17 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         self.read_ep.wait_enabled().await;
     }
 
-    pub fn parse_mtp_command<'a>(&self, buf: &'a[u8]) -> Result<PtpCommand<'a>, MtpError> {
-        let length = usize::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    pub fn parse_mtp_command<'a>(&self, buf: &'a[u8], phase: MtpContainerType) -> Result<PtpCommand<'a>, MtpError> {
+        let length = usize::from_le_bytes(buf[0..4].try_into().unwrap());
         if length < 12 {
             return Err(MtpError::CannotParseHeader);
         }
-        let packet_type = u16::from_le_bytes([buf[4], buf[5]]);
-        let op_code = u16::from_le_bytes([buf[6], buf[7]]);
-        let transaction_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        let packet_type = u16::from_le_bytes(buf[4..6].try_into().unwrap());
+        let op_code = u16::from_le_bytes(buf[6..8].try_into().unwrap());
+        let transaction_id = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         let payload = &buf[12..length];
 
-        if packet_type != 0x0001 {
+        if packet_type != phase as u16 {
             return Err(MtpError::WrongPacketType);
         }
 
@@ -183,7 +206,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             *offset += 1;
             return
         }
-        
+
         buf[*offset] = (s.len() + 1) as u8; // total chars incl. null
         *offset += 1;
 
@@ -202,8 +225,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
     fn generate_ok_response_block(&self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let length = 12u32.to_le_bytes();
-        let packet_type = 0x0003u16.to_le_bytes();       // Response Block
-        let response_code = 0x2001u16.to_le_bytes();     // OK
+        let packet_type = (MtpContainerType::Response as u16).to_le_bytes();       // Response Block
+        let response_code = (MtpCommandError::Ok as u16).to_le_bytes();     // OK
         let tx_id = transaction_id.to_le_bytes();
 
         buffer[0..4].copy_from_slice(&length);
@@ -236,9 +259,9 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         Self::write_string(buffer, &mut offset, "microsoft.com: 1.0"); // VendorExtensionDesc
         Self::write_u16(buffer, &mut offset, 0); // FunctionalMode
         let supported_operations = [
-            0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x1007, 0x1008, 0x1009, 0x100A, 
-            0x100B, 0x100C, 0x100D, 0x100E, 0x100F, 0x1010, 0x1011, 0x1012, 0x1013, 0x1014, 
-            0x1015, 0x1016, 0x1017, 0x1018, 0x1019, 0x101A, 0x101B, 0x101C, 0x9801, 0x9802, 
+            0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x1007, 0x1008, 0x1009, 0x100A,
+            0x100B, 0x100C, 0x100D, 0x100E, 0x100F, 0x1010, 0x1011, 0x1012, 0x1013, 0x1014,
+            0x1015, 0x1016, 0x1017, 0x1018, 0x1019, 0x101A, 0x101B, 0x101C, 0x9801, 0x9802,
             0x9803, 0x9804, 0x9810, 0x9811, 0x9820, 0x9805, 0x9806, 0x9807, 0x9808,
         ];
         Self::write_u32(buffer, &mut offset, supported_operations.len().try_into().unwrap()); // NumOperationsSupported
@@ -246,7 +269,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             Self::write_u16(buffer, &mut offset, operation); // OperationSupported
         }
         let supported_events = [
-            0x4000, 0x4001, 0x4002, 0x4003, 0x4004, 0x4005, 0x4006, 0x4007, 0x4008, 0x4009, 
+            0x4000, 0x4001, 0x4002, 0x4003, 0x4004, 0x4005, 0x4006, 0x4007, 0x4008, 0x4009,
             0x400A, 0x400B, 0x400C, 0x400D, 0x400E, 0xC801, 0xC802, 0xC803,
         ];
         Self::write_u32(buffer, &mut offset, supported_events.len().try_into().unwrap()); // NumEventsSupported
@@ -262,8 +285,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }
         Self::write_u32(buffer, &mut offset, 0); // CaptureFormats = empty
         let supported_playbacks = [
-            0x3000, 0x3001, 0x3004, 0x3005, 0x3008, 0x3009, 0x300b, 0x3801, 0x3802, 0x3804, 
-            0x3807, 0x3808, 0x380b, 0x380d, 0xb901, 0xb902, 0xb903, 0xb982, 0xb983, 0xb984, 
+            0x3000, 0x3001, 0x3004, 0x3005, 0x3008, 0x3009, 0x300b, 0x3801, 0x3802, 0x3804,
+            0x3807, 0x3808, 0x380b, 0x380d, 0xb901, 0xb902, 0xb903, 0xb982, 0xb983, 0xb984,
             0xba05, 0xba10, 0xba11, 0xba14, 0xba82, 0xb906, 0x3811, 0x3812,
         ];
         Self::write_u32(buffer, &mut offset, supported_playbacks.len().try_into().unwrap()); // NumPlaybackSupported
@@ -297,7 +320,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     fn generate_storage_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
-        let storage_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        let storage_id= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         if storage_id != 0x00010001 {
             return 0;
         }
@@ -322,7 +345,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     fn object_format_codes_contains(cmd: &PtpCommand, needle: u16) -> bool {
-        let object_format_code_count= u32::from_le_bytes([cmd.payload[4], cmd.payload[5], cmd.payload[6], cmd.payload[7]]);
+        let object_format_code_count= u32::from_le_bytes(cmd.payload[4..8].try_into().unwrap());
         if object_format_code_count == 0 {
             return true;
         }
@@ -338,13 +361,12 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     fn object_handle_of_association_contains(cmd: &PtpCommand, needle: u32) -> bool {
-        let object_format_code_count= u32::from_le_bytes([cmd.payload[4], cmd.payload[5], cmd.payload[6], cmd.payload[7]]);
+        let object_format_code_count= u32::from_le_bytes(cmd.payload[4..8].try_into().unwrap());
         let object_format_code_offset = 8;
         let object_handle_of_association_offset = object_format_code_offset + (object_format_code_count * 2) as usize;
-        let object_handle_of_association= u32::from_le_bytes([cmd.payload[object_handle_of_association_offset], 
-                                                                   cmd.payload[object_handle_of_association_offset+1], 
-                                                                   cmd.payload[object_handle_of_association_offset+2], 
-                                                                   cmd.payload[object_handle_of_association_offset+3]]);
+        let object_handle_of_association= u32::from_le_bytes(cmd.payload[
+            object_handle_of_association_offset..object_handle_of_association_offset+4
+            ].try_into().unwrap());
         if object_handle_of_association == 0 {
             return true;
         }
@@ -353,18 +375,18 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
     fn generate_object_handles_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let mut offset = 12;
-        let storage_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        let storage_id= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         let mut object_handle_offset = offset;
         offset += 4;
         let mut object_handle_count = 0;
-        if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) && 
-            Self::object_format_codes_contains(cmd, 0x3001) && 
+        if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) &&
+            Self::object_format_codes_contains(cmd, 0x3001) &&
             Self::object_handle_of_association_contains(cmd, 0xFFFFFFFF) {
                 Self::write_u32(buffer, &mut offset, 0x00000001); // ObjectHandle[0] id
                 object_handle_count += 1;
         }
-        if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) && 
-            Self::object_format_codes_contains(cmd, 0x3000) && 
+        if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) &&
+            Self::object_format_codes_contains(cmd, 0x3000) &&
             Self::object_handle_of_association_contains(cmd, 0x00000001) {
                 Self::write_u32(buffer, &mut offset, 0x00000002); // ObjectHandle[0] id
                 object_handle_count += 1;
@@ -384,7 +406,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     fn generate_object_info_response<'a>(&self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
-        let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        let object_handle= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         let mut offset = 12;
         match object_handle  {
             0x00000001 => {
@@ -421,7 +443,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
                 Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
                 Self::write_u32(buffer, &mut offset, 0x00000001); // Parent Object
-                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u16(buffer, &mut offset, 0); // Association Type
                 Self::write_u32(buffer, &mut offset, 0); // Association Description
                 Self::write_u32(buffer, &mut offset, 0); // Sequence Number
                 Self::write_string(buffer, &mut offset, "rom.nes"); // Filename
@@ -442,7 +464,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
                 Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
                 Self::write_u32(buffer, &mut offset, 0x00000001); // Parent Object
-                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u16(buffer, &mut offset, 0); // Association Type
                 Self::write_u32(buffer, &mut offset, 0); // Association Description
                 Self::write_u32(buffer, &mut offset, 0); // Sequence Number
                 Self::write_string(buffer, &mut offset, "config.json"); // Filename
@@ -462,7 +484,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
         offset
     }
-    
+
     async fn generate_nes_rom_object_response(&mut self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let mut offset = 0;
         self.out_channel.send(Msg::Start).await;
@@ -470,8 +492,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         loop {
             match receiver.receive().await {
                 Msg::DumpSetupData {mapper, prg_length_16k, chr_length_8k} => {
-                    Self::write_u32(buffer, &mut offset, (((prg_length_16k as u32 * 16) + 
-                                                                    (chr_length_8k as u32 * 8)) * 1024) + 
+                    Self::write_u32(buffer, &mut offset, (((prg_length_16k as u32 * 16) +
+                                                                    (chr_length_8k as u32 * 8)) * 1024) +
                                                                     12 + 16);
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
                     Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetObject
@@ -528,7 +550,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 },
                 _ => {}
             }
-        }     
+        }
 
         0
     }
@@ -536,7 +558,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     fn generate_config_json_object_response(&mut self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let mut offset = 12;
         Self::write_buffer(buffer, &mut offset, &self.configuration_file[0..self.configuration_file_size]); // File content
-        
+
         let total_len = offset as u32;
         Self::write_u32(buffer, &mut 0, total_len);
         Self::write_u16(buffer, &mut 4, 2);         // ContainerType: Data
@@ -547,7 +569,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     async fn generate_object_response<'a>(&mut self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
-        let object_handle= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        let object_handle= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         match object_handle {
             0x00000002 => {
                 self.generate_nes_rom_object_response(transaction_id, buffer).await
@@ -562,10 +584,124 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     }
 
     fn generate_delete_object_response<'a>(&mut self, cmd: &PtpCommand<'a>) -> usize {
-        let object_id= u32::from_le_bytes([cmd.payload[0], cmd.payload[1], cmd.payload[2], cmd.payload[3]]);
+        let object_id= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         if object_id == 0x00000003 || object_id == 0xFFFFFFFF {
             self.configuration_file_deleted = true;
         }
+        0
+    }
+
+    async fn generate_send_object_info_response<'a>(&mut self, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
+        let storage_id= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
+        let parent_id= u32::from_le_bytes(cmd.payload[4..8].try_into().unwrap());
+        if storage_id != 0x00010001 && parent_id != 0x00000001 {
+            return 0;
+        }
+
+        // Read one USB bulk packet from the host.
+        let _ = self.read_packet(&mut buffer[0..64]).await;
+        let len = match self.read_packet(&mut buffer[64..128]).await {
+            Ok(n) if n > 0 => {
+                match self.parse_mtp_command(&buffer, MtpContainerType::Data) {
+                    Ok(cmd) => {
+                        let command_result = match cmd.op_code {
+                            0x100c => {
+                                let object_format = u16::from_le_bytes(cmd.payload[4..6].try_into().unwrap());
+                                let object_compressed_size = u32::from_le_bytes(cmd.payload[8..12].try_into().unwrap());
+                                let parent_object=u32::from_le_bytes(cmd.payload[38..42].try_into().unwrap());
+                                let association_type=u16::from_le_bytes(cmd.payload[42..44].try_into().unwrap());
+                                let association_description=u32::from_le_bytes(cmd.payload[44..48].try_into().unwrap());
+                                let filename_length = cmd.payload[52] as usize -1;
+                                let filename = &cmd.payload[53..53+filename_length*2];
+                                if object_format != 0x3000 {
+                                    Err(MtpCommandError::InvalidObjectFormatCode)
+                                } else if object_compressed_size as usize > self.configuration_file.len()  {
+                                    Err(MtpCommandError::ObjectTooLarge)
+                                } else if parent_object != 0x00000001 {
+                                    Err(MtpCommandError::InvalidParentObject)
+                                } else if association_type != 0 {
+                                    Err(MtpCommandError::OperationNotSupported)
+                                } else if association_description != 0 {
+                                    Err(MtpCommandError::OperationNotSupported)
+                                } else if filename_length != "config.json".len() ||
+                                    filename.chunks_exact(2)
+                                        .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+                                        .zip("config.json".encode_utf16().chain(iter::repeat(0))) // evitiamo panic se lunghezze diverse
+                                        .any(|(a, b)| a != b){
+                                    Err(MtpCommandError::OperationNotSupported)
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                            _ => {Err(MtpCommandError::OperationNotSupported)},
+                        };
+                        match command_result {
+                            Ok(()) => {
+                                let mut offset = self.generate_ok_response_block(cmd.transaction_id, buffer);
+                                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID in which the object will be stored
+                                Self::write_u32(buffer, &mut offset, 0x00000001);// Parent ObjectHandle in which the object will be stored
+                                Self::write_u32(buffer, &mut offset, 0x00000003); // Reserved ObjectHandle for the incoming object
+                                let length = offset.to_le_bytes();
+                                buffer[0..4].copy_from_slice(&length);
+                                offset
+                            },
+                            Err(error) => {self.generate_error_response_block(cmd.transaction_id, buffer, error as u16)},
+                        }
+                    }
+                    _ => {
+                        0
+                    }
+                }
+            }
+            _ => {
+                // Allow the USB stack some breathing room; not strictly required
+                // but avoids busy‑looping if the host stalls communication.
+                Timer::after_millis(1).await;
+                0
+            }
+        };
+        let mut offset = 0;
+        while offset < len {
+            let end = core::cmp::min(offset + self.max_packet_size(), len);
+            let chunk = &buffer[offset..end];
+            match self.write_packet(&chunk).await {
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+            offset = end;
+        }
+        0
+    }
+
+    async fn generate_send_object_response(&mut self, buffer: &mut [u8]) -> usize {
+        let _ = self.read_packet(&mut buffer[0..64]).await;
+        match self.read_packet(&mut buffer[64..128]).await {
+            Ok(n) if n > 0 => {
+                match self.parse_mtp_command(&buffer, MtpContainerType::Data) {
+                    Ok(cmd) => {
+                        match cmd.op_code {
+                            0x100d => {
+                                self.configuration_file.fill(0);
+                                self.configuration_file_size = core::cmp::min(cmd.payload.len(), self.configuration_file.len());
+                                self.configuration_file[..self.configuration_file_size].copy_from_slice(&cmd.payload[..self.configuration_file_size]);
+                                match serde_json_core::from_slice(&self.configuration_file[..self.configuration_file_size]) {
+                                    Ok((config, _)) => {
+                                        self.send_updated_dumper_config(&config).await;
+                                    }
+                                    _ => {}
+                                };
+                            }
+                            _ => {}
+                        };
+                    }
+                    _ => {}
+                };
+            }
+            _ => {}
+        };
         0
     }
 
@@ -623,6 +759,12 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             0x100b => {
                 len = self.generate_delete_object_response(&cmd);
             }
+            0x100c => {
+                len = self.generate_send_object_info_response(&mut buf, &cmd).await;
+            }
+            0x100d => {
+                len = self.generate_send_object_response(&mut buf).await;
+            }
             _ => {
                 len = 0;
             }
@@ -664,6 +806,9 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             0x100b => {
                 len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
             }
+            0x100d => {
+                len = self.generate_ok_response_block(cmd.transaction_id, &mut buf);
+            }
             _ => {
                 len = 0;
             }
@@ -681,5 +826,34 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             }
             offset = end;
         }
+    }
+
+    async fn send_updated_dumper_config(&mut self, dumper_config: &DumperConfig) {
+        let mut field = [0u8;Msg::DUMP_SETUP_DATA_CHANGED_LENGTH];
+        let mut value = [0u8;Msg::DUMP_SETUP_DATA_CHANGED_LENGTH];
+
+        field[.."mapper".len()].copy_from_slice("mapper".as_bytes());
+        value[..1].copy_from_slice(&[dumper_config.mapper]);
+        self.out_channel.send(Msg::DumpSetupDataChanged { field, value }).await;
+        field.fill(0);
+        value.fill(0);
+        field[.."prgsize".len()].copy_from_slice("prgsize".as_bytes());
+        value[..1].copy_from_slice(&[dumper_config.prgsize]);
+        self.out_channel.send(Msg::DumpSetupDataChanged { field, value }).await;
+        field.fill(0);
+        value.fill(0);
+        field[.."chrsize".len()].copy_from_slice("chrsize".as_bytes());
+        value[..1].copy_from_slice(&[dumper_config.chrsize]);
+        self.out_channel.send(Msg::DumpSetupDataChanged { field, value }).await;
+        field.fill(0);
+        value.fill(0);
+        field[.."prg".len()].copy_from_slice("prg".as_bytes());
+        value[..2].copy_from_slice(&dumper_config.prg.to_ne_bytes());
+        self.out_channel.send(Msg::DumpSetupDataChanged { field, value }).await;
+        field.fill(0);
+        value.fill(0);
+        field[.."chr".len()].copy_from_slice("chr".as_bytes());
+        value[..2].copy_from_slice(&dumper_config.chr.to_ne_bytes());
+        self.out_channel.send(Msg::DumpSetupDataChanged { field, value }).await;
     }
 }

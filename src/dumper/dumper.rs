@@ -14,11 +14,14 @@ pub enum Msg {
         chr_length_8k: u8,
     },
     DumpSetupDataChanged {
-        field: [u8;DATA_CHANNEL_SIZE/2],
-        value: [u8;DATA_CHANNEL_SIZE/2],
+        field: [u8;Self::DUMP_SETUP_DATA_CHANGED_LENGTH],
+        value: [u8;Self::DUMP_SETUP_DATA_CHANGED_LENGTH],
     },
     Data([u8; DATA_CHANNEL_SIZE]),
     End,
+}
+impl Msg {
+    pub const DUMP_SETUP_DATA_CHANGED_LENGTH: usize = DATA_CHANNEL_SIZE / 2;
 }
 
 pub struct DumperConfig {
@@ -91,10 +94,10 @@ impl<'d> DumperClass<'d>
     ) -> Self {
         let m2 = Output::new(m2_pin, Level::High, Default::default());
         let pgr_ce = Output::new(pgr_ce_pin, Level::High, Default::default());
-        Output::new(chr_wr_pin, Level::High, Default::default()); // let chr_wr = 
-        Input::new(ciram_ce_pin, Pull::Up); // let ciram_ce = 
+        Output::new(chr_wr_pin, Level::High, Default::default()); // let chr_wr =
+        Input::new(ciram_ce_pin, Pull::Up); // let ciram_ce =
         let chr_rd = Output::new(chr_rd_pin, Level::High, Default::default());
-        Input::new(irq_pin, Pull::Up); // let irq = 
+        Input::new(irq_pin, Pull::Up); // let irq =
         let prg_rw = Output::new(prg_rw_pin, Level::High, Default::default());
 
         let a = [
@@ -116,7 +119,7 @@ impl<'d> DumperClass<'d>
             Output::new(a_pins.15, Level::High, Default::default()),
         ];
 
-        Input::new(ciram_a10_pin, Pull::Up); // let ciram_a10 = 
+        Input::new(ciram_a10_pin, Pull::Up); // let ciram_a10 =
 
         let d = [
             Flex::new(d_pins.0),
@@ -129,12 +132,12 @@ impl<'d> DumperClass<'d>
             Flex::new(d_pins.7)
         ];
 
-       return Self { 
-            m2, 
-            pgr_ce, 
-            //chr_wr, 
-            //ciram_ce, 
-            chr_rd, 
+       return Self {
+            m2,
+            pgr_ce,
+            //chr_wr,
+            //ciram_ce,
+            chr_rd,
             //irq,
             prg_rw,
             a,
@@ -210,7 +213,7 @@ impl<'d> DumperClass<'d>
     fn read_data(&mut self) -> u8{
         let mut data = 0;
         for (index, pin) in self.d.iter().enumerate() {
-            data |= (pin.is_high() as u8) << index; 
+            data |= (pin.is_high() as u8) << index;
         }
         data
     }
@@ -341,7 +344,7 @@ impl<'d> DumperClass<'d>
         for c in 0..512 {
             crc32[c] = read_prg_byte(u16::try_from(0x8000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
             crc32_mmc3[c] = read_prg_byte(u16::try_from(0xE000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
-        } 
+        }
 
         let mapper = 0;
         let prglo = 0;
@@ -387,7 +390,7 @@ impl<'d> DumperClass<'d>
             chrsize: 5,
             prg: 256,
             chr: 128
-        }; 
+        };
 
         let receiver = self.in_channel.receiver();
         loop {
@@ -404,21 +407,21 @@ impl<'d> DumperClass<'d>
                 Msg::DumpSetupDataChanged { field, value } => {
                     let field_encoded = str::from_utf8(&field).unwrap();
                     match field_encoded {
-                        "mapper" => {
-                            config.mapper = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
-                        } 
-                        "prgsize" => {
-                            config.prgsize = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
-                        } 
-                        "chrsize" => {
-                            config.chrsize = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
-                        } 
-                        "prg" => {
-                            config.prg = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
-                        } 
-                        "chr" => {
-                            config.chr = str::from_utf8(&value).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
-                        } 
+                        "mapper\0\0\0\0\0\0\0\0\0\0" => {
+                            config.mapper = value[0]
+                        }
+                        "prgsize\0\0\0\0\0\0\0\0\0" => {
+                            config.prgsize = value[0]
+                        }
+                        "chrsize\0\0\0\0\0\0\0\0\0" => {
+                            config.chrsize = value[0]
+                        }
+                        "prg\0\0\0\0\0\0\0\0\0\0\0\0\0" => {
+                            config.prg = u16::from_ne_bytes(value[0..2].try_into().unwrap())
+                        }
+                        "chr\0\0\0\0\0\0\0\0\0\0\0\0\0" => {
+                            config.chr = u16::from_ne_bytes(value[0..2].try_into().unwrap())
+                        }
                         _ => {}
                     }
                 }

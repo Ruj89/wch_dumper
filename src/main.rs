@@ -16,12 +16,12 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 mod usb;
 mod dumper;
 
-use crate::usb::mtp::{MtpClass};
+use crate::usb::mtp::{MtpClass, MtpContainerType};
 use crate::dumper::dumper::{DumperClass, Msg, DATA_CHANNEL_SIZE};
 
 const ENDPOINT_COUNT: usize = 14;
 
-bind_interrupts!(struct Irq { 
+bind_interrupts!(struct Irq {
     OTG_FS => otg_fs::InterruptHandler<peripherals::OTG_FS>;
 });
 
@@ -70,7 +70,7 @@ async fn main(spawner: Spawner) -> ! {
         EP_BUFFERS.init(core::array::from_fn(|_| EndpointDataBuffer::default()))
     };
     let driver = Driver::new(p.OTG_FS, p.PA12, p.PA11, buffer);
-    
+
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0x6666, 0xcafe);
     config.manufacturer = Some("arkHive");
@@ -140,7 +140,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let mtp_class = MtpClass::new(
-        &mut builder, 
+        &mut builder,
         MAX_PACKET_SIZE,
         &TO_USB_CHANNEL,
         &TO_DUMPER_CHANNEL,
@@ -181,13 +181,13 @@ async fn mtp_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_CO
         // Read one USB bulk packet from the host.
         match mtp.read_packet(&mut buf).await {
             Ok(n) if n > 0 => {
-                match mtp.parse_mtp_command(&buf) {
+                match mtp.parse_mtp_command(&buf, MtpContainerType::Command) {
                     Ok(cmd) => {
                         mtp.handle_response(cmd).await;
-                    }    
+                    }
                     _ => {
                         // TODO: Handle error
-                    }   
+                    }
                 }
             }
             _ => {
