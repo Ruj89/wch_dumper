@@ -6,9 +6,16 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 pub const DATA_CHANNEL_SIZE: usize = 32;
 pub const BYTE_READ_RETRIES: usize = 1;
 
+pub enum MsgStartConsole {
+    Nes,
+    Snes,
+}
+
 pub enum Msg {
-    Start,
-    DumpSetupData{
+    Start {
+        console: MsgStartConsole
+    },
+    DumpSetupData {
         mapper: u8,
         prg_length_16k: u8,
         chr_length_8k: u8,
@@ -384,8 +391,11 @@ impl<'d> DumperClass<'d>
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
-                Msg::Start => {
-                    self.dump_nes().await;
+                Msg::Start {console} => {
+                    match console {
+                        MsgStartConsole::Nes => {self.dump_nes().await;}
+                        MsgStartConsole::Snes => {self.dump_snes().await;}
+                    };
                 }
                 Msg::DumpSetupDataChanged { field, value } => {
                     let field_encoded = str::from_utf8(&field).unwrap();
@@ -480,5 +490,10 @@ impl<'d> DumperClass<'d>
             }
             _ => {}
         }
+    }
+
+
+    async fn dump_snes(&mut self) {
+
     }
 }

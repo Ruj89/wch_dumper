@@ -9,7 +9,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use serde::{Serialize, Deserialize};
 
-use crate::dumper::dumper::Msg;
+use crate::dumper::dumper::{Msg, MsgStartConsole};
 
 /// This should be used as `device_class` when building the `UsbDevice`.
 const USB_CLASS_MTP: u8 = 0x06;
@@ -375,17 +375,23 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             Self::object_format_codes_contains(cmd, 0x3001) &&
             Self::object_handle_of_association_contains(cmd, 0xFFFFFFFF) {
                 Self::write_u32(buffer, &mut offset, 0x00000001); // ObjectHandle[0] id
-                object_handle_count += 1;
+                Self::write_u32(buffer, &mut offset, 0x00000004); // ObjectHandle[0] id
+                object_handle_count += 2;
         }
         if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) &&
-            Self::object_format_codes_contains(cmd, 0x3000) &&
-            Self::object_handle_of_association_contains(cmd, 0x00000001) {
+            Self::object_format_codes_contains(cmd, 0x3000) {
+            if Self::object_handle_of_association_contains(cmd, 0x00000001) {
                 Self::write_u32(buffer, &mut offset, 0x00000002); // ObjectHandle[0] id
                 object_handle_count += 1;
                 if !self.configuration_file_deleted {
                     Self::write_u32(buffer, &mut offset, 0x00000003); // ObjectHandle[0] id
                     object_handle_count += 1;
                 }
+            }
+            if Self::object_handle_of_association_contains(cmd, 0x00000004) {
+                Self::write_u32(buffer, &mut offset, 0x00000005); // ObjectHandle[0] id
+                object_handle_count += 1;
+            }
         }
         Self::write_u32(buffer, &mut object_handle_offset, object_handle_count); // NumObjectHandles
         let total_len = offset as u32;
@@ -464,6 +470,49 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
+
+            0x00000004 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3001); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000000); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "SNES"); // Filename
+                Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+            0x00000005 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000004); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "rom.sfc"); // Filename
+                Self::write_string(buffer, &mut offset, "20250714T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
             _ => {
                 return 0;
             }
@@ -477,9 +526,9 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         offset
     }
 
-    async fn generate_nes_rom_object_response(&mut self, transaction_id: u32, buffer: &mut [u8]) -> usize {
+    async fn generate_rom_object_response(&mut self, transaction_id: u32, buffer: &mut [u8], console: MsgStartConsole) -> usize {
         let mut offset = 0;
-        self.out_channel.send(Msg::Start).await;
+        self.out_channel.send(Msg::Start{console}).await;
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
@@ -564,10 +613,13 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let object_handle= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         match object_handle {
             0x00000002 => {
-                self.generate_nes_rom_object_response(transaction_id, buffer).await
+                self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Nes).await
             }
             0x00000003 => {
                 self.generate_config_json_object_response(transaction_id, buffer)
+            }
+            0x00000005 => {
+                self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Snes).await
             }
             _ => {
                 0
