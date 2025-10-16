@@ -13,11 +13,13 @@ use embassy_time::Timer;
 use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
-mod usb;
+#[path = "usb/mtp.rs"]
+mod mtp;
+#[path = "dumper/dumper.rs"]
 mod dumper;
 
-use crate::usb::mtp::{MtpClass, MtpContainerType};
-use crate::dumper::dumper::{DumperClass, Msg, DATA_CHANNEL_SIZE};
+use mtp::{MtpClass, MtpContainerType};
+use dumper::{DumperClass, Msg, DATA_CHANNEL_SIZE};
 
 const ENDPOINT_COUNT: usize = 14;
 

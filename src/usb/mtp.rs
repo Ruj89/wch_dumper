@@ -9,7 +9,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use serde::{Serialize, Deserialize};
 
-use crate::dumper::dumper::{Msg, MsgStartConsole};
+use crate::dumper::{Msg, MsgStartConsole};
 
 /// This should be used as `device_class` when building the `UsbDevice`.
 const USB_CLASS_MTP: u8 = 0x06;
