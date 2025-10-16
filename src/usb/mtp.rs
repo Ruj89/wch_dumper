@@ -53,7 +53,12 @@ pub enum MtpContainerType {
     Command = 0x0001,
     Data = 0x0002,
     Response = 0x0003,
-    // Event = 0x0004,
+    Event = 0x0004,
+}
+
+#[repr(u16)]
+pub enum MtpEvents {
+    ObjectInfoChanged = 0x4007,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -81,11 +86,13 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     //_comm_ep: D::EndpointIn,
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
+    interrupt_ep: D::EndpointIn,
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     configuration_file: &'d mut [u8],
     configuration_file_size: usize,
     configuration_file_deleted: bool,
+    rom_estimated_size: usize,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
@@ -103,7 +110,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let mut alt = iface.alt_setting(USB_CLASS_MTP, MTP_SUBCLASS, MTP_PROTOCOL, None);
         let read_ep = alt.endpoint_bulk_out(max_packet_size);
         let write_ep = alt.endpoint_bulk_in(max_packet_size);
-        //let comm_ep = alt.endpoint_interrupt_in(8, 255);
+        let interrupt_ep = alt.endpoint_interrupt_in(16, 255);
 
         drop(func);
 
@@ -120,11 +127,13 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
+            interrupt_ep,
             in_channel,
             out_channel,
             configuration_file,
             configuration_file_size,
             configuration_file_deleted: false,
+            rom_estimated_size: ((config.prg + config.chr) as usize * 1024) + 16,
         }
     }
 
@@ -138,6 +147,12 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
         let len = core::cmp::min(data.len(), self.max_packet_size() as usize);
         self.write_ep.write(&data[..len]).await
+    }
+
+    /// Writes a single packet into the IN endpoint.
+    pub async fn write_interrupt(&mut self, data: &[u8]) -> Result<(), EndpointError> {
+        let len = core::cmp::min(data.len(), 16 as usize);
+        self.interrupt_ep.write(&data[..len]).await
     }
 
     /// Reads a single packet from the OUT endpoint.
@@ -426,7 +441,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
-                Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
+                Self::write_u32(buffer, &mut offset, self.rom_estimated_size as u32); // Object Compressed Size
                 Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
                 Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
                 Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
@@ -682,6 +697,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                                 match serde_json_core::from_slice::<DumperConfig>(&self.configuration_file[..self.configuration_file_size]) {
                                     Ok((config, _)) => {
                                         self.send_updated_dumper_config(&config).await;
+                                        self.rom_estimated_size = ((config.prg + config.chr) as usize * 1024) + 16;
+                                        self.event_send_object_info_changed(buffer, 0x00000002).await;
                                     }
                                     _ => {}
                                 };
@@ -695,6 +712,32 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             _ => {}
         };
         0
+    }
+
+    async fn event_send_object_info_changed<'a>(&mut self, buffer: &mut [u8], object_handle: u32) {
+        let mut offset = 4; // Jump buffer size
+        Self::write_u16(buffer, &mut offset, MtpContainerType::Event as u16);
+        Self::write_u16(buffer, &mut offset, MtpEvents::ObjectInfoChanged as u16);
+        Self::write_u32(buffer, &mut offset, 0x00000000); // Last transaction ID
+        Self::write_u32(buffer, &mut offset, object_handle); // Object handle
+
+        let len = offset;
+        let mut offset = 0;
+
+        Self::write_u32(buffer, &mut 0, len as u32);
+
+        while offset < len {
+            let end = core::cmp::min(offset + 16, len);
+            let chunk = &buffer[offset..end];
+            match self.write_interrupt(&chunk).await {
+                _ => {
+                    // Allow the USB stack some breathing room; not strictly required
+                    // but avoids busy‑looping if the host stalls communication.
+                    Timer::after_millis(1).await;
+                }
+            }
+            offset = end;
+        }
     }
 
     async fn write_response_buffer(&mut self, buf: &[u8], len: usize) {
