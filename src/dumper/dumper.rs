@@ -47,6 +47,7 @@ pub struct DumperClass<'d> {
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
+    config: DumperConfig,
 }
 
 impl<'d> DumperClass<'d>
@@ -132,6 +133,52 @@ impl<'d> DumperClass<'d>
             Flex::new(d_pins.7)
         ];
 
+        /*
+        let mapper = 0;
+        let prglo = 0;
+        let prghi = 1;
+        let chrlo = 0;
+        let chrhi = 1;
+        let ramlo = 0;
+        let ramhi = 2;
+
+        let mapper = 4;
+        let prglo = 1;
+        let prghi = 5;
+        let chrlo = 0;
+        let chrhi = 6;
+        let ramlo = 0;
+        let ramhi = 1;
+        */
+        /*
+        let mapper = 0;
+        let prgsize = 1;
+        let chrsize = 1;
+        let prg = 32; // KB
+        let chr = 8; // KB
+        */
+        /*
+        let mapper = 0;
+        let prgsize = 0;
+        let chrsize = 1;
+        let prg = 16; // KB
+        let chr = 8; // KB
+        */
+        /*
+        let mut mapper: u8 = 4;
+        let mut prgsize: u8 = 4;
+        let mut chrsize: u8 = 5;
+        let mut prg: u16 = 256; // KB
+        let mut chr: u16 = 128; // KB
+        */
+        let config = DumperConfig {
+            mapper: 4,
+            prgsize: 4,
+            chrsize: 5,
+            prg: 256,
+            chr: 128
+        };
+
        return Self {
             m2,
             pgr_ce,
@@ -146,6 +193,7 @@ impl<'d> DumperClass<'d>
             in_channel,
             out_channel,
             buffer,
+            config,
         }
     }
 
@@ -333,94 +381,29 @@ impl<'d> DumperClass<'d>
     }
 
     pub async fn dump(&mut self) {
-        for dpin in &mut self.d {
-            dpin.set_as_input(Pull::Up);
-        }
-
-        /*
-        let crc32 =    unsafe { &mut *CRC32.0.get() };
-        let crc32_mmc3 =    unsafe { &mut *CRC32_MMC3.0.get() };
-
-        for c in 0..512 {
-            crc32[c] = read_prg_byte(u16::try_from(0x8000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
-            crc32_mmc3[c] = read_prg_byte(u16::try_from(0xE000 + c).expect("address overflow"),&mut (&mut a, &mut d, &mut prg_rw, &mut pgr_ce, &mut m2)).await;
-        }
-
-        let mapper = 0;
-        let prglo = 0;
-        let prghi = 1;
-        let chrlo = 0;
-        let chrhi = 1;
-        let ramlo = 0;
-        let ramhi = 2;
-
-        let mapper = 4;
-        let prglo = 1;
-        let prghi = 5;
-        let chrlo = 0;
-        let chrhi = 6;
-        let ramlo = 0;
-        let ramhi = 1;
-        */
-        /*
-        let mapper = 0;
-        let prgsize = 1;
-        let chrsize = 1;
-        let prg = 32; // KB
-        let chr = 8; // KB
-        */
-        /*
-        let mapper = 0;
-        let prgsize = 0;
-        let chrsize = 1;
-        let prg = 16; // KB
-        let chr = 8; // KB
-        */
-        /*
-        let mut mapper: u8 = 4;
-        let mut prgsize: u8 = 4;
-        let mut chrsize: u8 = 5;
-        let mut prg: u16 = 256; // KB
-        let mut chr: u16 = 128; // KB
-        */
-
-        let mut config = DumperConfig {
-            mapper: 4,
-            prgsize: 4,
-            chrsize: 5,
-            prg: 256,
-            chr: 128
-        };
-
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
                 Msg::Start => {
-                    self.out_channel.send(Msg::DumpSetupData{ mapper: config.mapper, prg_length_16k: (config.prg / 16) as u8, chr_length_8k: (config.chr / 8) as u8}).await;
-
-                    self.read_prg(config.mapper, config.prgsize).await;
-                    if config.chrsize > 0 {
-                        self.read_chr(config.mapper, config.chrsize).await;
-                    }
-                    self.out_channel.send(Msg::End).await;
+                    self.dump_nes().await;
                 }
                 Msg::DumpSetupDataChanged { field, value } => {
                     let field_encoded = str::from_utf8(&field).unwrap();
                     match field_encoded {
                         "mapper\0\0\0\0\0\0\0\0\0\0" => {
-                            config.mapper = value[0]
+                            self.config.mapper = value[0]
                         }
                         "prgsize\0\0\0\0\0\0\0\0\0" => {
-                            config.prgsize = value[0]
+                            self.config.prgsize = value[0]
                         }
                         "chrsize\0\0\0\0\0\0\0\0\0" => {
-                            config.chrsize = value[0]
+                            self.config.chrsize = value[0]
                         }
                         "prg\0\0\0\0\0\0\0\0\0\0\0\0\0" => {
-                            config.prg = u16::from_ne_bytes(value[0..2].try_into().unwrap())
+                            self.config.prg = u16::from_ne_bytes(value[0..2].try_into().unwrap())
                         }
                         "chr\0\0\0\0\0\0\0\0\0\0\0\0\0" => {
-                            config.chr = u16::from_ne_bytes(value[0..2].try_into().unwrap())
+                            self.config.chr = u16::from_ne_bytes(value[0..2].try_into().unwrap())
                         }
                         _ => {}
                     }
@@ -428,6 +411,19 @@ impl<'d> DumperClass<'d>
                 _ => {}
             }
         }
+    }
+
+    async fn dump_nes(&mut self) {
+        for dpin in &mut self.d {
+            dpin.set_as_input(Pull::Up);
+        }
+        self.out_channel.send(Msg::DumpSetupData{ mapper: self.config.mapper, prg_length_16k: (self.config.prg / 16) as u8, chr_length_8k: (self.config.chr / 8) as u8}).await;
+
+        self.read_prg(self.config.mapper, self.config.prgsize).await;
+        if self.config.chrsize > 0 {
+            self.read_chr(self.config.mapper, self.config.chrsize).await;
+        }
+        self.out_channel.send(Msg::End).await;
     }
 
     async fn read_prg(&mut self, mapper: u8, size: u8) {
