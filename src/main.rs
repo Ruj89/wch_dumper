@@ -152,6 +152,7 @@ async fn main(spawner: Spawner) -> ! {
             p.PE13,
             p.PE10,
         ),
+        p.PE11,
         &TO_DUMPER_CHANNEL,
         &TO_USB_CHANNEL,
         unsafe { &mut *DUMPER_BUF.0.get() },

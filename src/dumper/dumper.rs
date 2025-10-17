@@ -67,6 +67,7 @@ pub struct DumperClass<'d> {
     refresh: Output<'d>,
     expand: Input<'d>,
     d_snes: [Flex<'d>; 7],
+    irq_snes: Input<'d>,
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     buffer: &'d mut [u8; Msg::DATA_CHANNEL_SIZE],
@@ -128,6 +129,7 @@ impl<'d> DumperClass<'d>
             impl Peripheral<P = impl Pin> + 'd,
             impl Peripheral<P = impl Pin> + 'd,
         ),
+        irq_snes_pin: impl Peripheral<P = impl Pin> + 'd,
         in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         buffer: &'d mut [u8; Msg::DATA_CHANNEL_SIZE],
@@ -189,6 +191,7 @@ impl<'d> DumperClass<'d>
             Flex::new(d_snes_pins.5),
             Flex::new(d_snes_pins.6),
         ];
+        let irq_snes = Input::new(irq_snes_pin, Pull::None);
 
         /*
         let mapper = 0;
@@ -255,6 +258,7 @@ impl<'d> DumperClass<'d>
             refresh,
             expand,
             d_snes,
+            irq_snes,
             in_channel,
             out_channel,
             buffer,
@@ -680,7 +684,6 @@ impl<'d> DumperClass<'d>
 
         self.set_refresh_low();
 
-        self.irq.set_as_input(Pull::None);
         let num_banks = self.get_cart_info_snes().await;
         self.out_channel.send(Msg::DumpSetupData{ rom_size: (0x10000 - 0x8000) * num_banks as u32}).await;
         self.read_rom_snes(num_banks).await;
