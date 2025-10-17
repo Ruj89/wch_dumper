@@ -496,7 +496,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
-                Self::write_u32(buffer, &mut offset, 0x8000+0x2000+16); // Object Compressed Size
+                Self::write_u32(buffer, &mut offset, (0x10000 - 0x8000) * 32); // Object Compressed Size
                 Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
                 Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
                 Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
@@ -532,28 +532,20 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let receiver = self.in_channel.receiver();
         loop {
             match receiver.receive().await {
-                Msg::DumpSetupData {mapper, prg_length_16k, chr_length_8k} => {
-                    Self::write_u32(buffer, &mut offset, (((prg_length_16k as u32 * 16) +
-                                                                    (chr_length_8k as u32 * 8)) * 1024) +
-                                                                    12 + 16);
+                Msg::DumpSetupData {rom_size} => {
+                    Self::write_u32(buffer, &mut offset, rom_size + 12);
                     Self::write_u16(buffer, &mut offset, 2);         // ContainerType: Data
                     Self::write_u16(buffer, &mut offset, 0x1009);    // Operation: GetObject
                     Self::write_u32(buffer, &mut offset, transaction_id);
-                    // 16 byte header
-                    Self::write_buffer(buffer, &mut offset, &[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
-                    Self::write_u8(buffer, &mut offset, prg_length_16k);
-                    Self::write_u8(buffer, &mut offset, chr_length_8k);
-                    Self::write_u8(buffer, &mut offset, (mapper & 0xF) << 4);
-                    Self::write_buffer(buffer, &mut offset, &[0x00u8; 9]);
                 },
-                Msg::Data(data) => {
-                    let buffer_write_size = core::cmp::min(data.len(), self.max_packet_size() - 1 - offset);
+                Msg::Data {data, length} => {
+                    let buffer_write_size = core::cmp::min(length, self.max_packet_size() - 1 - offset);
                     Self::write_buffer(buffer, &mut offset, &data[..buffer_write_size]);
                     if offset == self.max_packet_size() - 1 {
                         offset = 0;
                         match self.write_packet(&buffer[..self.max_packet_size() - 1]).await {
                             Ok(_) => {
-                                if buffer_write_size != data.len() {
+                                if buffer_write_size != length {
                                     Self::write_buffer(buffer, &mut offset, &data[buffer_write_size..]);
                                 }
                             }

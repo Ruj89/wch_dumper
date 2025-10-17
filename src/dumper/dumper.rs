@@ -3,7 +3,6 @@ use embassy_time::Timer;
 use embassy_sync::channel::Channel;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
-pub const DATA_CHANNEL_SIZE: usize = 32;
 pub const BYTE_READ_RETRIES: usize = 1;
 
 pub enum MsgStartConsole {
@@ -11,24 +10,27 @@ pub enum MsgStartConsole {
     Snes,
 }
 
+impl Msg {
+    pub const DATA_CHANNEL_SIZE: usize = 32;
+    pub const DUMP_SETUP_DATA_CHANGED_LENGTH: usize = Msg::DATA_CHANNEL_SIZE / 2;
+}
+
 pub enum Msg {
     Start {
         console: MsgStartConsole
     },
     DumpSetupData {
-        mapper: u8,
-        prg_length_16k: u8,
-        chr_length_8k: u8,
+        rom_size: u32,
     },
     DumpSetupDataChanged {
         field: [u8;Self::DUMP_SETUP_DATA_CHANGED_LENGTH],
         value: [u8;Self::DUMP_SETUP_DATA_CHANGED_LENGTH],
     },
-    Data([u8; DATA_CHANNEL_SIZE]),
+    Data {
+        data: [u8; Msg::DATA_CHANNEL_SIZE],
+        length: usize
+    },
     End,
-}
-impl Msg {
-    pub const DUMP_SETUP_DATA_CHANGED_LENGTH: usize = DATA_CHANNEL_SIZE / 2;
 }
 
 pub struct DumperConfig {
@@ -39,21 +41,35 @@ pub struct DumperConfig {
     pub chr: u16, // KB
 }
 
-
+#[repr(u8)]
+pub enum SnesRomType {
+    LO = 0,
+    HI = 1,
+    SA = 3,
+    EX = 4,
+}
 pub struct DumperClass<'d> {
     m2: Output<'d>,
     pgr_ce: Output<'d>,
-    //chr_wr: Output<'d>,
-    //ciram_ce: Input<'d>,
+    chr_wr: Output<'d>,
+    ciram_ce: Flex<'d>,
     chr_rd: Output<'d>,
-    //irq: Input<'d>,
+    irq: Flex<'d>,
     prg_rw: Output<'d>,
     a: [Output<'d>; 16],
-    //ciram_a10: Input<'d>,
+    ciram_a10: Flex<'d>,
     d: [Flex<'d>; 8],
+    a15: Output<'d>,
+    reset: Output<'d>,
+    cs: Output<'d>,
+    wr: Output<'d>,
+    rd: Output<'d>,
+    refresh: Output<'d>,
+    expand: Input<'d>,
+    d_snes: [Flex<'d>; 7],
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-    buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
+    buffer: &'d mut [u8; Msg::DATA_CHANNEL_SIZE],
     config: DumperConfig,
 }
 
@@ -96,16 +112,32 @@ impl<'d> DumperClass<'d>
             impl Peripheral<P = impl Pin> + 'd,
             impl Peripheral<P = impl Pin> + 'd,
         ),
+        a15_pin: impl Peripheral<P = impl Pin> + 'd,
+        reset_pin: impl Peripheral<P = impl Pin> + 'd,
+        cs_pin: impl Peripheral<P = impl Pin> + 'd,
+        wr_pin: impl Peripheral<P = impl Pin> + 'd,
+        rd_pin: impl Peripheral<P = impl Pin> + 'd,
+        refresh_pin: impl Peripheral<P = impl Pin> + 'd,
+        expand_pin: impl Peripheral<P = impl Pin> + 'd,
+        d_snes_pins: (
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+            impl Peripheral<P = impl Pin> + 'd,
+        ),
         in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-        buffer: &'d mut [u8; DATA_CHANNEL_SIZE],
+        buffer: &'d mut [u8; Msg::DATA_CHANNEL_SIZE],
     ) -> Self {
         let m2 = Output::new(m2_pin, Level::High, Default::default());
         let pgr_ce = Output::new(pgr_ce_pin, Level::High, Default::default());
-        Output::new(chr_wr_pin, Level::High, Default::default()); // let chr_wr =
-        Input::new(ciram_ce_pin, Pull::Up); // let ciram_ce =
+        let chr_wr = Output::new(chr_wr_pin, Level::High, Default::default());
+        let ciram_ce = Flex::new(ciram_ce_pin);
         let chr_rd = Output::new(chr_rd_pin, Level::High, Default::default());
-        Input::new(irq_pin, Pull::Up); // let irq =
+        let irq: Flex<'_> = Flex::new(irq_pin);
         let prg_rw = Output::new(prg_rw_pin, Level::High, Default::default());
 
         let a = [
@@ -127,7 +159,7 @@ impl<'d> DumperClass<'d>
             Output::new(a_pins.15, Level::High, Default::default()),
         ];
 
-        Input::new(ciram_a10_pin, Pull::Up); // let ciram_a10 =
+        let ciram_a10 = Flex::new(ciram_a10_pin);
 
         let d = [
             Flex::new(d_pins.0),
@@ -138,6 +170,24 @@ impl<'d> DumperClass<'d>
             Flex::new(d_pins.5),
             Flex::new(d_pins.6),
             Flex::new(d_pins.7)
+        ];
+
+        let a15 = Output::new(a15_pin, Level::High, Default::default());
+        let reset = Output::new(reset_pin, Level::High, Default::default());
+        let cs = Output::new(cs_pin, Level::High, Default::default());
+        let wr: Output<'_> = Output::new(wr_pin, Level::High, Default::default());
+        let rd: Output<'_> = Output::new(rd_pin, Level::High, Default::default());
+        let refresh = Output::new(refresh_pin, Level::High, Default::default());
+        let expand = Input::new(expand_pin, Pull::None);
+
+        let d_snes = [
+            Flex::new(d_snes_pins.0),
+            Flex::new(d_snes_pins.1),
+            Flex::new(d_snes_pins.2),
+            Flex::new(d_snes_pins.3),
+            Flex::new(d_snes_pins.4),
+            Flex::new(d_snes_pins.5),
+            Flex::new(d_snes_pins.6),
         ];
 
         /*
@@ -189,14 +239,22 @@ impl<'d> DumperClass<'d>
        return Self {
             m2,
             pgr_ce,
-            //chr_wr,
-            //ciram_ce,
+            chr_wr,
+            ciram_ce,
             chr_rd,
-            //irq,
+            irq,
             prg_rw,
             a,
-            //ciram_a10,
+            ciram_a10,
             d,
+            a15,
+            reset,
+            cs,
+            wr,
+            rd,
+            refresh,
+            expand,
+            d_snes,
             in_channel,
             out_channel,
             buffer,
@@ -365,24 +423,24 @@ impl<'d> DumperClass<'d>
         for x in 0..self.buffer.len() {
              self.buffer[x] = self.read_prg_byte(base + address + x as u16).await;
         }
-        self.out_channel.send(Msg::Data(*self.buffer)).await;
+        self.out_channel.send(Msg::Data{data: *self.buffer, length: self.buffer.len()}).await;
     }
 
     async fn dump_chr(&mut self, address: u16) {
         for x in 0..self.buffer.len() {
             self.buffer[x] = self.read_chr_byte(address + x as u16).await;
         }
-        self.out_channel.send(Msg::Data(*self.buffer)).await;
+        self.out_channel.send(Msg::Data{data: *self.buffer, length: self.buffer.len()}).await;
     }
 
     async fn dump_bank_prg(&mut self, from: u16, to: u16, base: u16) {
-        for address in (from..to).step_by(DATA_CHANNEL_SIZE) {
+        for address in (from..to).step_by(Msg::DATA_CHANNEL_SIZE) {
             self.dump_prg(base, address).await;
         }
     }
 
     async fn dump_bank_chr(&mut self, from: u16, to: u16) {
-        for address in (from..to).step_by(DATA_CHANNEL_SIZE) {
+        for address in (from..to).step_by(Msg::DATA_CHANNEL_SIZE) {
             self.dump_chr(address).await;
         }
     }
@@ -427,7 +485,17 @@ impl<'d> DumperClass<'d>
         for dpin in &mut self.d {
             dpin.set_as_input(Pull::Up);
         }
-        self.out_channel.send(Msg::DumpSetupData{ mapper: self.config.mapper, prg_length_16k: (self.config.prg / 16) as u8, chr_length_8k: (self.config.chr / 8) as u8}).await;
+        self.ciram_ce.set_as_input(Pull::Up);
+        self.irq.set_as_input(Pull::Up);
+        self.out_channel.send(Msg::DumpSetupData{ rom_size: ((self.config.prg / 16) + (self.config.chr / 8)) as u32}).await;
+
+        // 16 byte header
+        self.buffer[..4].copy_from_slice(&[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
+        self.buffer[4] = (self.config.prg / 16) as u8;
+        self.buffer[5] = (self.config.chr / 8) as u8;
+        self.buffer[6] = (self.config.mapper & 0xF) << 4;
+        self.buffer[7..16].copy_from_slice(&[0x00u8; 9]);
+        self.out_channel.send(Msg::Data { data: *self.buffer, length: 16 }).await;
 
         self.read_prg(self.config.mapper, self.config.prgsize).await;
         if self.config.chrsize > 0 {
@@ -492,8 +560,191 @@ impl<'d> DumperClass<'d>
         }
     }
 
+    fn set_address_a(&mut self, address: u16) {
+        let mut index = 0;
+        self.m2.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.pgr_ce.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.chr_wr.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.ciram_ce.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.a[15].set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.chr_rd.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.irq.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.prg_rw.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        for d_index in 0..8 {
+            self.d[d_index].set_level(Level::from((address & (1 << (index + d_index))) > 0));
+        }
+    }
+
+    fn set_address_b(&mut self, address: u8) {
+        for index in 0..8 {
+            self.a[index].set_level(Level::from((address & (1 << (index))) > 0));
+        }
+    }
+
+    fn set_address_p(&mut self, address: u8) {
+        for index in 8..15 {
+            self.a[index].set_level(Level::from((address & (1 << (index-8))) > 0));
+        }
+        self.a15.set_level(Level::from((address & (1 << 7)) > 0));
+    }
+
+    fn set_d_snes_pullup(&mut self) {
+        for index in 0..7 {
+            self.d_snes[index].set_as_input(Pull::Up);
+        }
+        self.ciram_a10.set_as_input(Pull::Up);
+    }
+
+    fn read_snes_data(&mut self) -> u8 {
+        let mut data = 0;
+        for (index, pin) in self.d_snes.iter().enumerate() {
+            let true_index = if index < 2 {index} else {index+1} ;
+            data |= (pin.is_high() as u8) << true_index;
+        }
+        data |= (self.ciram_a10.is_high() as u8) << 2;
+        data
+    }
+
+    fn set_reset_high(&mut self){
+        self.reset.set_high();
+    }
+
+    fn set_reset_low(&mut self){
+        self.reset.set_low();
+    }
+
+    fn set_wr_high(&mut self){
+        self.wr.set_high();
+    }
+
+    fn set_wr_low(&mut self){
+        self.wr.set_low();
+    }
+
+    fn set_rd_high(&mut self){
+        self.rd.set_high();
+    }
+
+    fn set_rd_low(&mut self){
+        self.rd.set_low();
+    }
+
+    fn set_cs_high(&mut self){
+        self.cs.set_high();
+    }
+
+    fn set_cs_low(&mut self){
+        self.cs.set_low();
+    }
+
+    fn set_refresh_high(&mut self){
+        self.refresh.set_high();
+    }
+
+    fn set_refresh_low(&mut self){
+        self.refresh.set_low();
+    }
+
+    fn data_in(&mut self) {
+        self.set_d_snes_pullup();
+    }
+
+    fn control_in_snes(&mut self) {
+        self.set_wr_high();
+        self.set_cs_low();
+        self.set_rd_low();
+    }
 
     async fn dump_snes(&mut self) {
+        self.ciram_ce.set_as_output(Default::default());
+        self.ciram_ce.set_low();
+        self.irq.set_as_output(Default::default());
+        self.irq.set_low();
+        for d_index in 0..8 {
+            self.d[d_index].set_as_output(Default::default());
+            self.d[d_index].set_low();
+        }
 
+        self.set_reset_high();
+        self.set_wr_high();
+        self.set_cs_low();
+        self.set_rd_low();
+
+        self.set_refresh_low();
+
+        self.irq.set_as_input(Pull::None);
+        let num_banks = self.get_cart_info_snes().await;
+        self.out_channel.send(Msg::DumpSetupData{ rom_size: (0x10000 - 0x8000) * num_banks as u32}).await;
+        self.read_rom_snes(num_banks).await;
+        self.out_channel.send(Msg::End).await;
+    }
+
+    async fn get_cart_info_snes(&mut self) -> u8 {
+        self.set_address_b(0b11000000);
+        for curr_byte in 0..1024 {
+            self.set_address_a(curr_byte);
+            Timer::after_nanos(375).await;
+        }
+        self.check_cart_snes().await
+    }
+
+    async fn check_cart_snes(&mut self) -> u8 {
+        self.data_in();
+
+        let header_start = 0xFFB0;
+        let mut snes_header = [0u8;80];
+        self.set_address_b(0x00);
+        for c in 0..80 {
+            let curr_byte = header_start + c as u16;
+            self.set_address_a(curr_byte);
+            Timer::after_nanos(750).await;
+
+            snes_header[c] = self.read_snes_data();
+        }
+        let rom_type = match snes_header[(0xFFD5 - header_start) as usize] {
+            0x35 => {SnesRomType::EX as u8},
+            0x3A  => {SnesRomType::HI as u8},
+            v if ((v >> 5) != 1) => {SnesRomType::LO as u8},
+            v => {v & 1},
+        };
+
+        let rom_size_exp = snes_header[(0xFFD7 - header_start) as usize] - 7;
+        let mut rom_size = 1;
+        for _ in 0..rom_size_exp {
+            rom_size *= 2;
+        }
+
+        ((rom_size as usize * 1024 * 1024 / 8) / (0x8000 + (rom_type as usize * 0x8000))) as u8
+    }
+
+    async fn read_rom_snes(&mut self, num_banks: u8) {
+        self.data_in();
+        self.control_in_snes();
+        self.read_lo_rom_banks(0, num_banks).await;
+    }
+
+    async fn read_lo_rom_banks(&mut self, start: u8, total: u8) {
+        for curr_bank in start..total-start {
+            self.set_address_b(curr_bank);
+            let range = 0x8000..=0xFFFF;
+            for chunk_start in range.step_by(Msg::DATA_CHANNEL_SIZE) {
+                let bytes_range = chunk_start..=(chunk_start - 1 + Msg::DATA_CHANNEL_SIZE as u16).min(0xFFFF);
+                let bytes_len = bytes_range.len();
+                for (c, curr_byte) in bytes_range.enumerate() {
+                    self.set_address_a(curr_byte);
+                    Timer::after_nanos(375).await;
+                    self.buffer[c] = self.read_snes_data();
+                }
+                self.out_channel.send(Msg::Data{data: *self.buffer, length: bytes_len}).await;
+            }
+        }
     }
 }

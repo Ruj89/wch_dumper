@@ -19,7 +19,7 @@ mod mtp;
 mod dumper;
 
 use mtp::{MtpClass, MtpContainerType};
-use dumper::{DumperClass, Msg, DATA_CHANNEL_SIZE};
+use dumper::{DumperClass, Msg};
 
 const ENDPOINT_COUNT: usize = 14;
 
@@ -56,7 +56,7 @@ static CONFIG_DESCRIPTOR        : StaticCell<[u8; 256]> = StaticCell(UnsafeCell:
 static BOS_DESCRIPTOR           : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static MSOS_DESCRIPTOR          : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static CONTROL_BUF              : StaticCell<[u8;  64]> = StaticCell(UnsafeCell::new([0;  64]));
-static DUMPER_BUF               : StaticCell<[u8;  DATA_CHANNEL_SIZE]> = StaticCell(UnsafeCell::new([0;  DATA_CHANNEL_SIZE]));
+static DUMPER_BUF               : StaticCell<[u8;  Msg::DATA_CHANNEL_SIZE]> = StaticCell(UnsafeCell::new([0;  Msg::DATA_CHANNEL_SIZE]));
 static DUMPER_CONFIGURATION_BUF : StaticCell<[u8;1024]> = StaticCell(UnsafeCell::new([0;  1024]));
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
@@ -134,7 +134,23 @@ async fn main(spawner: Spawner) -> ! {
             p.PD8,
             p.PD9,
             p.PD10,
-            p.PD11
+            p.PD11,
+        ),
+        p.PD5,
+        p.PB2,
+        p.PE7,
+        p.PE9,
+        p.PE8,
+        p.PD12,
+        p.PD14,
+        (
+            p.PD1,
+            p.PE2,
+            p.PE14,
+            p.PE15,
+            p.PE12,
+            p.PE13,
+            p.PE10,
         ),
         &TO_DUMPER_CHANNEL,
         &TO_USB_CHANNEL,
