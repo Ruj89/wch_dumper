@@ -491,7 +491,9 @@ impl<'d> DumperClass<'d>
         }
         self.ciram_ce.set_as_input(Pull::Up);
         self.irq.set_as_input(Pull::Up);
-        self.out_channel.send(Msg::DumpSetupData{ rom_size: ((self.config.prg / 16) + (self.config.chr / 8)) as u32}).await;
+        self.out_channel.send(Msg::DumpSetupData{ rom_size:
+            ((self.config.prg as u32 + self.config.chr as u32) * 1024) + 16
+            }).await;
 
         // 16 byte header
         self.buffer[..4].copy_from_slice(&[0x4Eu8, 0x45u8, 0x53u8, 0x1Au8]);
@@ -684,13 +686,18 @@ impl<'d> DumperClass<'d>
 
         self.set_refresh_low();
 
-        let num_banks = self.get_cart_info_snes().await;
-        self.out_channel.send(Msg::DumpSetupData{ rom_size: (0x10000 - 0x8000) * num_banks as u32}).await;
-        self.read_rom_snes(num_banks).await;
+        let (num_banks, rom_type) = self.get_cart_info_snes().await;
+        let rom_size = match rom_type {
+            v if v == SnesRomType::LO as u8 => {(0x10000 - 0x8000) * num_banks as u32},
+            v if v == SnesRomType::HI as u8 => {0x10000 * num_banks as u32},
+            _ => {0}
+        };
+        self.out_channel.send(Msg::DumpSetupData{ rom_size }).await;
+        self.read_rom_snes(num_banks, rom_type).await;
         self.out_channel.send(Msg::End).await;
     }
 
-    async fn get_cart_info_snes(&mut self) -> u8 {
+    async fn get_cart_info_snes(&mut self) -> (u8, u8) {
         self.set_address_b(0b11000000);
         for curr_byte in 0..1024 {
             self.set_address_a(curr_byte);
@@ -699,7 +706,7 @@ impl<'d> DumperClass<'d>
         self.check_cart_snes().await
     }
 
-    async fn check_cart_snes(&mut self) -> u8 {
+    async fn check_cart_snes(&mut self) -> (u8, u8) {
         self.data_in();
 
         let header_start = 0xFFB0;
@@ -725,21 +732,42 @@ impl<'d> DumperClass<'d>
             rom_size *= 2;
         }
 
-        ((rom_size as usize * 1024 * 1024 / 8) / (0x8000 + (rom_type as usize * 0x8000))) as u8
+        (((rom_size as usize * 1024 * 1024 / 8) / (0x8000 + (rom_type as usize * 0x8000))) as u8, rom_type)
     }
 
-    async fn read_rom_snes(&mut self, num_banks: u8) {
+    async fn read_rom_snes(&mut self, num_banks: u8, rom_type: u8) {
         self.data_in();
         self.control_in_snes();
-        self.read_lo_rom_banks(0, num_banks).await;
+        match rom_type {
+            v if v == SnesRomType::LO as u8 =>  {self.read_lo_rom_banks(0, num_banks).await;}
+            v if v == SnesRomType::HI as u8 =>  {self.read_hi_rom_banks(192, num_banks + 192).await;}
+            _ => {}
+        }
     }
 
-    async fn read_lo_rom_banks(&mut self, start: u8, total: u8) {
-        for curr_bank in start..total-start {
+    async fn read_lo_rom_banks(&mut self, start: u8, end: u8) {
+        for curr_bank in start..end {
             self.set_address_b(curr_bank);
             let range = 0x8000..=0xFFFF;
             for chunk_start in range.step_by(Msg::DATA_CHANNEL_SIZE) {
                 let bytes_range = chunk_start..=(chunk_start - 1 + Msg::DATA_CHANNEL_SIZE as u16).min(0xFFFF);
+                let bytes_len = bytes_range.len();
+                for (c, curr_byte) in bytes_range.enumerate() {
+                    self.set_address_a(curr_byte);
+                    Timer::after_nanos(375).await;
+                    self.buffer[c] = self.read_snes_data();
+                }
+                self.out_channel.send(Msg::Data{data: *self.buffer, length: bytes_len}).await;
+            }
+        }
+    }
+
+    async fn read_hi_rom_banks(&mut self, start: u8, end: u8) {
+        for curr_bank in start..end {
+            self.set_address_b(curr_bank);
+            let range = 0..=0xFFFF;
+            for chunk_start in range.step_by(Msg::DATA_CHANNEL_SIZE) {
+                let bytes_range = chunk_start..=((chunk_start as u32 + Msg::DATA_CHANNEL_SIZE as u32) - 1 ).min(0xFFFF) as u16;
                 let bytes_len = bytes_range.len();
                 for (c, curr_byte) in bytes_range.enumerate() {
                     self.set_address_a(curr_byte);
