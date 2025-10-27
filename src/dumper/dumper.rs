@@ -232,11 +232,11 @@ impl<'d> DumperClass<'d>
         let mut chr: u16 = 128; // KB
         */
         let config = DumperConfig {
-            mapper: 4,
-            prgsize: 4,
-            chrsize: 5,
-            prg: 256,
-            chr: 128
+            mapper: 1,
+            prgsize: 3,
+            chrsize: 0,
+            prg: 128,
+            chr: 0
         };
 
        return Self {
@@ -327,6 +327,17 @@ impl<'d> DumperClass<'d>
         self.chr_rd.set_low();
     }
 
+
+    fn set_romsel_low_and_m2_high(&mut self){
+        self.m2.set_high();
+        self.pgr_ce.set_low();
+    }
+
+    fn set_romsel_high_and_m2_low(&mut self){
+        self.m2.set_low();
+        self.pgr_ce.set_high();
+    }
+
     fn read_data(&mut self) -> u8{
         let mut data = 0;
         for (index, pin) in self.d.iter().enumerate() {
@@ -391,6 +402,42 @@ impl<'d> DumperClass<'d>
         let result = Self::retry_read::<_,BYTE_READ_RETRIES>(|| self.read_data()).await;
         self.set_chr_read_high();
         result
+    }
+
+    async fn write_reg_byte(&mut self, address: u16, data: u8) {  // FIX FOR MMC1 RAM CORRUPTION
+        self.set_phy2_low();
+        self.set_romsel_high();
+        self.set_write_mode();
+        self.set_prg_write();
+        self.write_data(data);
+
+        self.set_address(address);  // PHI2 low, ROMSEL always HIGH
+        // DIRECT PIN TO PREVENT RAM CORRUPTION
+        // DIFFERENCE BETWEEN M2 LO AND ROMSEL HI MUST BE AROUND 33ns
+        // IF TIME IS GREATER THAN 33ns THEN WRITES TO 0xE000/0xF000 WILL CORRUPT RAM AT 0x6000/0x7000
+        //PORTF = 0b01111101;  // ROMSEL LO/M2 HI
+        self.set_romsel_low_and_m2_high();
+        //PORTF = 0b01111110;  // ROMSEL HI/M2 LO
+        self.set_romsel_high_and_m2_low();
+        Timer::after_micros(1).await;
+        // Back to read mode
+        self.set_prg_read();
+        self.set_mode_read();
+        self.set_address(0);
+        // Set phi2 to high state to keep cartridge unreseted
+        self.set_phy2_high();
+    }
+
+    async fn write_mmc1_byte(&mut self, address: u16, data: u8) {
+        if address >= 0xE000 {
+            for i in 0..5u8 {
+                self.write_reg_byte(address, data >> i).await;
+            }
+        } else {
+            for j in 0..5u8 {
+                self.write_prg_byte(address, data >> j).await;  // shift 1 bit into temp register
+            }
+        }
     }
 
     async fn retry_read<F, const N: usize>(mut f: F) -> u8
@@ -519,6 +566,26 @@ impl<'d> DumperClass<'d>
             0 => {
                 let banks = 1 << size;
                 self.dump_bank_prg(0x0, 0x4000 * banks, base).await;
+            },
+            1 => {
+                if size == 1 {
+                    self.write_prg_byte(0x8000, 0x80).await;
+                    self.dump_bank_prg(0x0000, 0x8000, base).await;
+                } else {
+                    let banks = 1u8 << size;
+                    for i in 0..banks {
+                        self.write_prg_byte(0x8000, 0x80).await;
+                        self.write_mmc1_byte(0x8000, 0x0C).await;
+                        if size > 4 {
+                            self.write_mmc1_byte(0xA000, 0x0C).await;
+                        }
+                        if i > 15 {
+                            self.write_mmc1_byte(0xA000, 0x10).await;
+                        }
+                        self.write_mmc1_byte(0xE000, i).await;
+                        self.dump_bank_prg(0x0000, 0x4000, base).await;
+                    }
+                }
             },
             4 => {
                 let banks = (1u16 << size) * 2;

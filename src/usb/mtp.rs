@@ -108,11 +108,11 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         drop(func);
 
         let config = DumperConfig {
-            mapper: 4,
-            prgsize: 4,
-            chrsize: 5,
-            prg: 256,
-            chr: 128
+            mapper: 1,
+            prgsize: 3,
+            chrsize: 0,
+            prg: 128,
+            chr: 0
         };
 
         let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
