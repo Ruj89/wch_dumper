@@ -1,3 +1,5 @@
+use core::default;
+
 use ch32_hal::{gpio::{Flex, Input, Level, Output, Pin, Pull}, Peripheral};
 use embassy_time::Timer;
 use embassy_sync::channel::Channel;
@@ -8,6 +10,7 @@ pub const BYTE_READ_RETRIES: usize = 1;
 pub enum MsgStartConsole {
     Nes,
     Snes,
+    Sms,
 }
 
 impl Msg {
@@ -504,6 +507,7 @@ impl<'d> DumperClass<'d>
                     match console {
                         MsgStartConsole::Nes => {self.dump_nes().await;}
                         MsgStartConsole::Snes => {self.dump_snes().await;}
+                        MsgStartConsole::Sms => {self.dump_sms().await;}
                     };
                 }
                 Msg::DumpSetupDataChanged { field, value } => {
@@ -753,18 +757,17 @@ impl<'d> DumperClass<'d>
 
         self.set_refresh_low();
 
-        let (num_banks, rom_type) = self.get_cart_info_snes().await;
-        let rom_size = match rom_type {
+        let (rom_size, num_banks, rom_type) = self.get_cart_info_snes().await;
+        self.out_channel.send(Msg::DumpSetupData{ rom_size: match rom_type {
             v if v == SnesRomType::LO as u8 => {(0x10000 - 0x8000) * num_banks as u32},
             v if v == SnesRomType::HI as u8 => {0x10000 * num_banks as u32},
             _ => {0}
-        };
-        self.out_channel.send(Msg::DumpSetupData{ rom_size }).await;
-        self.read_rom_snes(num_banks, rom_type).await;
+        }}).await;
+        self.read_rom_snes(rom_size, num_banks, rom_type).await;
         self.out_channel.send(Msg::End).await;
     }
 
-    async fn get_cart_info_snes(&mut self) -> (u8, u8) {
+    async fn get_cart_info_snes(&mut self) -> (u8, u8, u8) {
         self.set_address_b(0b11000000);
         for curr_byte in 0..1024 {
             self.set_address_a(curr_byte);
@@ -773,7 +776,7 @@ impl<'d> DumperClass<'d>
         self.check_cart_snes().await
     }
 
-    async fn check_cart_snes(&mut self) -> (u8, u8) {
+    async fn check_cart_snes(&mut self) -> (u8, u8, u8) {
         self.data_in();
 
         let header_start = 0xFFB0;
@@ -782,31 +785,70 @@ impl<'d> DumperClass<'d>
         for c in 0..80 {
             let curr_byte = header_start + c as u16;
             self.set_address_a(curr_byte);
-            Timer::after_nanos(750).await;
+            Timer::after_nanos(75000).await;
 
             snes_header[c] = self.read_snes_data();
         }
-        let rom_type = match snes_header[(0xFFD5 - header_start) as usize] {
+        let mut rom_type = match snes_header[(0xFFD5 - header_start) as usize] {
+            v if ((v >> 5) != 1) => {SnesRomType::LO as u8},
             0x35 => {SnesRomType::EX as u8},
             0x3A  => {SnesRomType::HI as u8},
-            v if ((v >> 5) != 1) => {SnesRomType::LO as u8},
             v => {v & 1},
         };
 
-        let rom_size_exp = snes_header[(0xFFD7 - header_start) as usize] - 7;
+        let rom_chips = snes_header[(0xFFD6 - header_start) as usize];
         let mut rom_size = 1;
-        for _ in 0..rom_size_exp {
-            rom_size *= 2;
+        let mut num_banks = 0;
+        if rom_chips == 69 {
+            rom_size = 48;
+            num_banks = 96;
+            rom_type = SnesRomType::HI as u8;
+        } else if rom_chips == 67 {
+            rom_size = 32;
+            num_banks = 64;
+            rom_type = SnesRomType::HI as u8;
+        } else if rom_chips == 243 {
+            let cx4_type = snes_header[(0xFFC9 - header_start) as usize] & 0xF;
+            if cx4_type == 2 {  // X2
+                rom_size = 12;
+                num_banks = 48;
+            } else if cx4_type == 3 {  // X3
+                rom_size = 16;
+                num_banks = 64;
+            }
+        } else if rom_chips == 245 && rom_type == SnesRomType::HI as u8 {
+            rom_size = 24;
+            num_banks = 48;
+        } else if rom_chips == 249 && rom_type == SnesRomType::HI as u8 {
+            rom_size = 40;
+            num_banks = 80;
+        } else {
+            let rom_size_exp = snes_header[(0xFFD7 - header_start) as usize] - 7;
+            for _ in 0..rom_size_exp {
+                rom_size *= 2;
+            }
+            if rom_type == SnesRomType::EX as u8 || rom_type == SnesRomType::SA as u8 {
+                num_banks = rom_size as u8 * 2
+            } else {
+                num_banks = ((rom_size as usize * 1024 * (1024 / 8)) / (0x8000 + (rom_type as usize * 0x8000))) as u8;
+            }
         }
 
-        (((rom_size as usize * 1024 * 1024 / 8) / (0x8000 + (rom_type as usize * 0x8000))) as u8, rom_type)
+        (rom_size, num_banks, rom_type)
     }
 
-    async fn read_rom_snes(&mut self, num_banks: u8, rom_type: u8) {
+    async fn read_rom_snes(&mut self, rom_size: u8,  num_banks: u8, rom_type: u8) {
         self.data_in();
         self.control_in_snes();
         match rom_type {
-            v if v == SnesRomType::LO as u8 =>  {self.read_lo_rom_banks(0, num_banks).await;}
+            v if v == SnesRomType::LO as u8 =>  {
+                if rom_size > 24 {
+                    // ROM > 96 banks (up to 128 banks)
+                    self.read_lo_rom_banks(0x80, num_banks + 0x80).await;
+                } else {
+                    self.read_lo_rom_banks(0, num_banks).await;
+                }
+            }
             v if v == SnesRomType::HI as u8 =>  {self.read_hi_rom_banks(192, num_banks + 192).await;}
             _ => {}
         }
@@ -843,6 +885,177 @@ impl<'d> DumperClass<'d>
                 }
                 self.out_channel.send(Msg::Data{data: *self.buffer, length: bytes_len}).await;
             }
+        }
+    }
+
+    async fn dump_sms(&mut self) {
+        let cart_size = self.setup_sms().await;
+        self.out_channel.send(Msg::DumpSetupData{ rom_size: cart_size }).await;
+        self.read_rom_sms(cart_size).await;
+        self.out_channel.send(Msg::End).await;
+    }
+
+    fn set_address_sms(&mut self, address: u16) {
+        let mut index = 0;
+        self.m2.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.pgr_ce.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.chr_wr.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.ciram_ce.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.a[15].set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.chr_rd.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.irq.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        self.prg_rw.set_level(Level::from((address & (1 << index)) > 0));
+        index += 1;
+        for d_index in 0..7 {
+            self.d[d_index].set_level(Level::from((address & (1 << (index + d_index))) > 0));
+        }
+    }
+
+    fn set_data_sms(&mut self, data: u8) {
+        for d_snes_index in 0..=1 {
+            self.d_snes[d_snes_index].set_level(Level::from((data & (1 << (d_snes_index))) > 0));
+        }
+        self.ciram_a10.set_level(Level::from((data & (1 << 2)) > 0));
+        for d_snes_index in 2..=6 {
+            self.d_snes[d_snes_index].set_level(Level::from((data & (1 << (d_snes_index + 1))) > 0));
+        }
+    }
+
+    async fn write_byte_sms(&mut self, my_address: u16, my_data: u8) {
+        for i in 0..7 {
+            self.d_snes[i].set_as_output(Default::default());
+        }
+        self.ciram_a10.set_as_output(Default::default());
+        self.set_address_sms(my_address);
+        self.cs.set_level(Level::from((my_address & (1 << 15)) > 0));
+        self.set_data_sms(my_data);
+        Timer::after_nanos(63).await;
+        self.a[1].set_low();
+        self.wr.set_low();
+        Timer::after_nanos(63).await;
+        self.wr.set_high();
+        self.a[1].set_high();
+        Timer::after_nanos(63).await;
+        for i in 0..7 {
+            self.d_snes[i].set_as_input(Pull::Up);
+        }
+        self.ciram_a10.set_as_input(Pull::Up);
+    }
+
+    fn read_nibble(&self, data: u8, number: u8) -> u8 {
+        (data >> (number * 4)) & 0xF
+    }
+
+    fn get_data_sms(&mut self) -> u8 {
+        let mut data = 0;
+        for (index, pin) in self.d_snes.iter().enumerate() {
+            let true_index = if index < 2 {index} else {index+1} ;
+            data |= (pin.is_high() as u8) << true_index;
+        }
+        data |= (self.ciram_a10.is_high() as u8) << 2;
+        data
+    }
+
+    async fn read_byte_sms(&mut self, my_address: u16) -> u8 {
+        for d_snes_index in 0..7 {
+            self.d_snes[d_snes_index].set_as_input(Pull::Up);
+        }
+        self.ciram_a10.set_as_input(Pull::Up);
+        self.set_address_sms(my_address);
+        self.cs.set_level(Level::from((my_address & (1 << 15)) > 0));
+        Timer::after_nanos(63).await;
+        self.a[1].set_low();
+        self.rd.set_low();
+        Timer::after_nanos(63).await;
+        let temp_byte = self.get_data_sms();
+        self.rd.set_high();
+        self.a[1].set_high();
+        Timer::after_nanos(63).await;
+        temp_byte
+    }
+
+    async fn get_cart_info_sms(&mut self) -> u32 {
+        let card_nib_byte = self.read_byte_sms(0x7FFF).await;
+        let cart_nib = self.read_nibble(card_nib_byte, 0);
+        let mut cart_size = match cart_nib {
+            0x0a => 8192,
+            0x0b => 16384,
+            0x0c => 32768,
+            0x0d => 49152,
+            0x0e => 65536,
+            0x0f => 131072,
+            0x00 => 262144,
+            0x01 => 524288,
+            0x02 => 524288,
+            0x03 => 131072,
+            _ => 49152,
+        };
+        let mut rom_name = [0u8;8];
+        for char_index in 0..rom_name.len() {
+            rom_name[char_index] = self.read_byte_sms(0x7FF0 + char_index as u16).await;
+        }
+        if str::from_utf8(&rom_name).unwrap_or(Default::default()) == "TMR SEGA" {
+            let mut bank = 1u8;
+            let mut rom_name_buf = [0u8;8];
+            while bank < 64 {
+                bank += 1;
+                self.write_byte_sms(0xFFFE, bank).await;
+                for char_index in 0..rom_name_buf.len() {
+                    rom_name_buf[char_index] = self.read_byte_sms(0x7FF0 + char_index as u16).await;
+                }
+                if rom_name == rom_name_buf {
+                    break;
+                }
+            }
+            if bank > 2 {
+                cart_size = (bank - 1) as u32 * 16384;
+            }
+            self.write_byte_sms(0xFFFE, 1).await;
+        }
+        cart_size
+    }
+
+    async fn setup_sms(&mut self) -> u32 {
+        self.ciram_ce.set_as_output(Default::default());
+        self.irq.set_as_output(Default::default());
+        for i in 0..7 {
+            self.d[i].set_as_output(Default::default());
+        }
+        self.reset.set_high();
+        self.wr.set_high();
+        self.rd.set_high();
+        self.a[1].set_high();
+        self.write_byte_sms(0xFFFC, 0).await;
+        self.write_byte_sms(0xFFFD, 0).await;
+        self.write_byte_sms(0xFFFE, 1).await;
+        self.write_byte_sms(0xFFFF, 2).await;
+        Timer::after_millis(400).await;
+        self.get_cart_info_sms().await
+    }
+
+    async fn read_rom_sms(&mut self, cart_size: u32) {
+        let mut bank_size = 16384;
+        if cart_size == 32768 {
+            bank_size = cart_size as u16;
+        }
+        let banks_count = cart_size / (bank_size as u32);
+        for curr_bank in 0x0..banks_count as u8 {
+            self.write_byte_sms(0xFFFF, curr_bank).await;
+            Timer::after_nanos(63).await;
+            for curr_buffer in (0..bank_size).step_by(self.buffer.len()) {
+                for curr_byte in 0..self.buffer.len() as u16 {
+                    self.buffer[curr_byte as usize] = self.read_byte_sms((if cart_size == 32768 { 0 } else { 0x8000 }) + curr_buffer + curr_byte).await;
+                }
+                self.out_channel.send(Msg::Data{data: *self.buffer, length: self.buffer.len()}).await;
+            }
+            Timer::after_nanos(63).await;
         }
     }
 }

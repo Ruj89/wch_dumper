@@ -374,9 +374,15 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) &&
             Self::object_format_codes_contains(cmd, 0x3001) &&
             Self::object_handle_of_association_contains(cmd, 0xFFFFFFFF) {
-                Self::write_u32(buffer, &mut offset, 0x00000001); // ObjectHandle[0] id
-                Self::write_u32(buffer, &mut offset, 0x00000004); // ObjectHandle[0] id
-                object_handle_count += 2;
+                let handles = [
+                    0x00000001,
+                    0x00000004,
+                    0x00000006,
+                ];
+                for handle in handles.iter() {
+                    Self::write_u32(buffer, &mut offset, *handle); // ObjectHandle[0] id
+                }
+                object_handle_count += handles.len() as u32;
         }
         if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) &&
             Self::object_format_codes_contains(cmd, 0x3000) {
@@ -390,6 +396,10 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             }
             if Self::object_handle_of_association_contains(cmd, 0x00000004) {
                 Self::write_u32(buffer, &mut offset, 0x00000005); // ObjectHandle[0] id
+                object_handle_count += 1;
+            }
+            if Self::object_handle_of_association_contains(cmd, 0x00000006) {
+                Self::write_u32(buffer, &mut offset, 0x00000007); // ObjectHandle[0] id
                 object_handle_count += 1;
             }
         }
@@ -513,6 +523,49 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
+
+            0x00000006 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3001); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000000); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "Sega Master System"); // Filename
+                Self::write_string(buffer, &mut offset, "20251205T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20251205T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+            0x00000007 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, (0x10000 - 0x8000) * 32); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000006); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "rom.sms"); // Filename
+                Self::write_string(buffer, &mut offset, "20251205T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20251205T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
             _ => {
                 return 0;
             }
@@ -612,6 +665,9 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             }
             0x00000005 => {
                 self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Snes).await
+            }
+            0x00000007 => {
+                self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Sms).await
             }
             _ => {
                 0
