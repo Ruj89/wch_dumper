@@ -822,8 +822,10 @@ impl<'d> DumperClass<'d>
     }
 
     async fn dump_sms(&mut self) {
-      let cart_size = self.setup_sms().await;
-      self.read_rom_sms(cart_size).await;
+        let cart_size = self.setup_sms().await;
+        self.out_channel.send(Msg::DumpSetupData{ rom_size: cart_size }).await;
+        self.read_rom_sms(cart_size).await;
+        self.out_channel.send(Msg::End).await;
     }
 
     fn set_address_sms(&mut self, address: u16) {
@@ -865,7 +867,7 @@ impl<'d> DumperClass<'d>
         }
         self.ciram_a10.set_as_output(Default::default());
         self.set_address_sms(my_address);
-        self.cs.set_level(Level::from((my_address & (1 << 3)) > 0));
+        self.cs.set_level(Level::from((my_address & (1 << 15)) > 0));
         self.set_data_sms(my_data);
         Timer::after_nanos(63).await;
         self.a[1].set_low();
@@ -874,7 +876,10 @@ impl<'d> DumperClass<'d>
         self.wr.set_high();
         self.a[1].set_high();
         Timer::after_nanos(63).await;
-        self.set_data_sms(0x00);
+        for i in 0..7 {
+            self.d_snes[i].set_as_input(Pull::Up);
+        }
+        self.ciram_a10.set_as_input(Pull::Up);
     }
 
     fn read_nibble(&self, data: u8, number: u8) -> u8 {
@@ -892,15 +897,12 @@ impl<'d> DumperClass<'d>
     }
 
     async fn read_byte_sms(&mut self, my_address: u16) -> u8 {
-        for d_snes_index in 0..=1 {
+        for d_snes_index in 0..7 {
             self.d_snes[d_snes_index].set_as_input(Pull::Up);
         }
         self.ciram_a10.set_as_input(Pull::Up);
-        for d_snes_index in 2..=6 {
-            self.d_snes[d_snes_index].set_as_input(Pull::Up);
-        }
         self.set_address_sms(my_address);
-        self.cs.set_level(Level::from((my_address & (1 << 3)) > 0));
+        self.cs.set_level(Level::from((my_address & (1 << 15)) > 0));
         Timer::after_nanos(63).await;
         self.a[1].set_low();
         self.rd.set_low();
@@ -976,14 +978,17 @@ impl<'d> DumperClass<'d>
         if cart_size == 32768 {
             bank_size = cart_size as u16;
         }
-        for curr_bank in 0x0..(cart_size / (bank_size as u32)) as u8 {
+        let banks_count = cart_size / (bank_size as u32);
+        for curr_bank in 0x0..banks_count as u8 {
             self.write_byte_sms(0xFFFF, curr_bank).await;
+            Timer::after_nanos(63).await;
             for curr_buffer in (0..bank_size).step_by(self.buffer.len()) {
                 for curr_byte in 0..self.buffer.len() as u16 {
                     self.buffer[curr_byte as usize] = self.read_byte_sms((if cart_size == 32768 { 0 } else { 0x8000 }) + curr_buffer + curr_byte).await;
-                    self.out_channel.send(Msg::Data{data: *self.buffer, length: self.buffer.len()}).await;
                 }
+                self.out_channel.send(Msg::Data{data: *self.buffer, length: self.buffer.len()}).await;
             }
+            Timer::after_nanos(63).await;
         }
     }
 }
