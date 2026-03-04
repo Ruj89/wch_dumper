@@ -48,3 +48,12 @@ opt-level = "z" # Optimize for size.
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[features]
+default = [ "snes" 
+#, "nes", "ms", "md" 
+]
+snes = []
+nes = []
+ms = []
+md = []
