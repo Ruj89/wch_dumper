@@ -1,7 +1,5 @@
 //! MTP class implementation.
 
-use core::iter;
-
 use embassy_time::Timer;
 use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
 use embassy_usb::{Builder};
@@ -35,23 +33,23 @@ enum MtpCommandError {
     Ok = 0x2001,
     // SessionNotOpen = 0x2003,
     // InvalidTransactionId = 0x2004,
-    OperationNotSupported = 0x2005,
+    #[cfg(feature = "nes")] OperationNotSupported = 0x2005,
     // ParameterNotSupported = 0x2006,
     // InvalidStorageId = 0x2008,
-    InvalidObjectFormatCode = 0x200B,
+    #[cfg(feature = "nes")] InvalidObjectFormatCode = 0x200B,
     // StoreFull = 0x200C,
     // StoreReadOnly = 0x200E,
     // AccessDenied = 0x200F,
     StoreNotAvailable = 0x2013,
-    InvalidParentObject = 0x201A,
-    ObjectTooLarge = 0xA809,
+    #[cfg(feature = "nes")] InvalidParentObject = 0x201A,
+    #[cfg(feature = "nes")] ObjectTooLarge = 0xA809,
 }
 
 #[repr(u16)]
 pub enum MtpContainerType {
     // Undefined = 0x0000,
     Command = 0x0001,
-    Data = 0x0002,
+    #[cfg(feature = "nes")] Data = 0x0002,
     Response = 0x0003,
     // Event = 0x0004,
 }
@@ -83,9 +81,9 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     write_ep: D::EndpointIn,
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-    configuration_file: &'d mut [u8],
-    configuration_file_size: usize,
-    configuration_file_deleted: bool,
+    #[cfg(feature = "nes")] configuration_file: &'d mut [u8],
+    #[cfg(feature = "nes")] configuration_file_size: usize,
+    #[cfg(feature = "nes")] configuration_file_deleted: bool,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
@@ -95,19 +93,19 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         max_packet_size: u16,
         in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-        configuration_file: &'d mut [u8]) -> Self {
+        #[cfg(feature = "nes")] configuration_file: &'d mut [u8]) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
         let mut iface = func.interface();
         let mut alt = iface.alt_setting(USB_CLASS_MTP, MTP_SUBCLASS, MTP_PROTOCOL, None);
-        let read_ep = alt.endpoint_bulk_out(max_packet_size);
-        let write_ep = alt.endpoint_bulk_in(max_packet_size);
+        let read_ep = alt.endpoint_bulk_out(Option::None, max_packet_size);
+        let write_ep = alt.endpoint_bulk_in(Option::None, max_packet_size);
         //let comm_ep = alt.endpoint_interrupt_in(8, 255);
 
         drop(func);
 
-        let config = DumperConfig {
+        #[cfg(feature = "nes")] let config = DumperConfig {
             mapper: 1,
             prgsize: 3,
             chrsize: 0,
@@ -115,16 +113,16 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             chr: 0
         };
 
-        let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
+        #[cfg(feature = "nes")] let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
         MtpClass {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
             in_channel,
             out_channel,
-            configuration_file,
-            configuration_file_size,
-            configuration_file_deleted: false,
+            #[cfg(feature = "nes")] configuration_file,
+            #[cfg(feature = "nes")] configuration_file_size,
+            #[cfg(feature = "nes")] configuration_file_deleted: false,
         }
     }
 
@@ -171,11 +169,11 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         })
     }
 
-    // Helper: write little-endian u8
+    /* Helper: write little-endian u8
     fn write_u8(buf: &mut [u8], offset: &mut usize, val: u8) {
         buf[*offset] = val;
         *offset += 1;
-    }
+    }*/
 
     // Helper: write little-endian u16
     fn write_u16(buf: &mut [u8], offset: &mut usize, val: u16) {
@@ -375,9 +373,10 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             Self::object_format_codes_contains(cmd, 0x3001) &&
             Self::object_handle_of_association_contains(cmd, 0xFFFFFFFF) {
                 let handles = [
-                    0x00000001,
-                    0x00000004,
-                    0x00000006,
+                    #[cfg(feature = "nes")] 0x00000001,
+                    #[cfg(feature = "snes")] 0x00000004,
+                    #[cfg(feature = "ms")] 0x00000006,
+                    #[cfg(feature = "md")] 0x00000008,
                 ];
                 for handle in handles.iter() {
                     Self::write_u32(buffer, &mut offset, *handle); // ObjectHandle[0] id
@@ -386,6 +385,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }
         if (storage_id == 0xFFFFFFFF || storage_id == 0x00010001) &&
             Self::object_format_codes_contains(cmd, 0x3000) {
+            #[cfg(feature = "nes")]
             if Self::object_handle_of_association_contains(cmd, 0x00000001) {
                 Self::write_u32(buffer, &mut offset, 0x00000002); // ObjectHandle[0] id
                 object_handle_count += 1;
@@ -394,12 +394,19 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                     object_handle_count += 1;
                 }
             }
+            #[cfg(feature = "snes")]
             if Self::object_handle_of_association_contains(cmd, 0x00000004) {
                 Self::write_u32(buffer, &mut offset, 0x00000005); // ObjectHandle[0] id
                 object_handle_count += 1;
             }
+            #[cfg(feature = "ms")]
             if Self::object_handle_of_association_contains(cmd, 0x00000006) {
                 Self::write_u32(buffer, &mut offset, 0x00000007); // ObjectHandle[0] id
+                object_handle_count += 1;
+            }
+            #[cfg(feature = "md")]
+            if Self::object_handle_of_association_contains(cmd, 0x00000008) {
+                Self::write_u32(buffer, &mut offset, 0x00000009); // ObjectHandle[0] id
                 object_handle_count += 1;
             }
         }
@@ -417,7 +424,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         let object_handle= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         let mut offset = 12;
         match object_handle  {
-            0x00000001 => {
+            #[cfg(feature = "nes")] 0x00000001 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
@@ -438,7 +445,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
-            0x00000002 => {
+            #[cfg(feature = "nes")] 0x00000002 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
@@ -459,7 +466,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
-            0x00000003 => {
+            #[cfg(feature = "nes")] 0x00000003 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0000); // Protection Status
@@ -481,7 +488,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
 
-            0x00000004 => {
+            #[cfg(feature = "snes")] 0x00000004 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
@@ -502,7 +509,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "20250715T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
-            0x00000005 => {
+            #[cfg(feature = "snes")] 0x00000005 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
@@ -524,7 +531,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
 
-            0x00000006 => {
+            #[cfg(feature = "ms")] 0x00000006 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
@@ -545,7 +552,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_string(buffer, &mut offset, "20251205T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
             }
-            0x00000007 => {
+            #[cfg(feature = "ms")] 0x00000007 => {
                 Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
                 Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
                 Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
@@ -562,6 +569,49 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                 Self::write_u32(buffer, &mut offset, 0); // Association Description
                 Self::write_u32(buffer, &mut offset, 0); // Sequence Number
                 Self::write_string(buffer, &mut offset, "rom.sms"); // Filename
+                Self::write_string(buffer, &mut offset, "20251205T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20251205T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+
+            #[cfg(feature = "md")] 0x00000008 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3001); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3001); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000000); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0x0001); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "Sega Mega Drive"); // Filename
+                Self::write_string(buffer, &mut offset, "20251205T173222.0Z"); // Date Created
+                Self::write_string(buffer, &mut offset, "20251205T183222.0Z"); // Date Modified
+                Self::write_string(buffer, &mut offset, "0"); // Keywords
+            }
+            #[cfg(feature = "md")] 0x00000009 => {
+                Self::write_u32(buffer, &mut offset, 0x00010001); // StorageID
+                Self::write_u16(buffer, &mut offset, 0x3000); // Object Format
+                Self::write_u16(buffer, &mut offset, 0x0001); // Protection Status
+                Self::write_u32(buffer, &mut offset, 0x8000); // Object Compressed Size
+                Self::write_u16(buffer, &mut offset, 0x3000); // Thumb Format
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Compressed Size
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Thumb Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Width
+                Self::write_u32(buffer, &mut offset, 0); // Image Pix Height
+                Self::write_u32(buffer, &mut offset, 0); // Image Bit Depth
+                Self::write_u32(buffer, &mut offset, 0x00000008); // Parent Object
+                Self::write_u16(buffer, &mut offset, 0); // Association Type
+                Self::write_u32(buffer, &mut offset, 0); // Association Description
+                Self::write_u32(buffer, &mut offset, 0); // Sequence Number
+                Self::write_string(buffer, &mut offset, "rom.md"); // Filename
                 Self::write_string(buffer, &mut offset, "20251205T173222.0Z"); // Date Created
                 Self::write_string(buffer, &mut offset, "20251205T183222.0Z"); // Date Modified
                 Self::write_string(buffer, &mut offset, "0"); // Keywords
@@ -641,6 +691,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         0
     }
 
+    #[cfg(feature = "nes")]
     fn generate_config_json_object_response(&mut self, transaction_id: u32, buffer: &mut [u8]) -> usize {
         let mut offset = 12;
         Self::write_buffer(buffer, &mut offset, &self.configuration_file[0..self.configuration_file_size]); // File content
@@ -657,17 +708,25 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
     async fn generate_object_response<'a>(&mut self, transaction_id: u32, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let object_handle= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         match object_handle {
+            #[cfg(feature = "nes")]
             0x00000002 => {
                 self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Nes).await
             }
+            #[cfg(feature = "nes")]
             0x00000003 => {
                 self.generate_config_json_object_response(transaction_id, buffer)
             }
+            #[cfg(feature = "snes")]
             0x00000005 => {
                 self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Snes).await
             }
+            #[cfg(feature = "ms")]
             0x00000007 => {
                 self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Sms).await
+            }
+            #[cfg(feature = "md")]
+            0x00000009 => {
+                self.generate_rom_object_response(transaction_id, buffer, MsgStartConsole::Md).await
             }
             _ => {
                 0
@@ -675,6 +734,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }
     }
 
+    #[cfg(feature = "nes")]
     fn generate_delete_object_response<'a>(&mut self, cmd: &PtpCommand<'a>) -> usize {
         let object_id= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         if object_id == 0x00000003 || object_id == 0xFFFFFFFF {
@@ -683,6 +743,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         0
     }
 
+    #[cfg(feature = "nes")]
     async fn generate_send_object_info_response<'a>(&mut self, buffer: &mut [u8], cmd: &PtpCommand<'a>) -> usize {
         let storage_id= u32::from_le_bytes(cmd.payload[0..4].try_into().unwrap());
         let parent_id= u32::from_le_bytes(cmd.payload[4..8].try_into().unwrap());
@@ -698,6 +759,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                     Ok(cmd) => {
                         let command_result = match cmd.op_code {
                             0x100c => {
+                                use core::iter;
+
                                 let object_format = u16::from_le_bytes(cmd.payload[4..6].try_into().unwrap());
                                 let object_compressed_size = u32::from_le_bytes(cmd.payload[8..12].try_into().unwrap());
                                 let parent_object=u32::from_le_bytes(cmd.payload[38..42].try_into().unwrap());
@@ -768,6 +831,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         0
     }
 
+    #[cfg(feature = "nes")]
     async fn generate_send_object_response(&mut self, buffer: &mut [u8]) -> usize {
         let _ = self.read_packet(&mut buffer[0..64]).await;
         match self.read_packet(&mut buffer[64..128]).await {
@@ -848,12 +912,15 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             0x1009 => {
                 len = self.generate_object_response(cmd.transaction_id, &mut buf, &cmd).await;
             }
+            #[cfg(feature = "nes")]
             0x100b => {
                 len = self.generate_delete_object_response(&cmd);
             }
+            #[cfg(feature = "nes")]
             0x100c => {
                 len = self.generate_send_object_info_response(&mut buf, &cmd).await;
             }
+            #[cfg(feature = "nes")]
             0x100d => {
                 len = self.generate_send_object_response(&mut buf).await;
             }
@@ -920,6 +987,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         }
     }
 
+    #[cfg(feature = "nes")]
     async fn send_updated_dumper_config(&mut self, dumper_config: &DumperConfig) {
         let mut field = [0u8;Msg::DUMP_SETUP_DATA_CHANGED_LENGTH];
         let mut value = [0u8;Msg::DUMP_SETUP_DATA_CHANGED_LENGTH];

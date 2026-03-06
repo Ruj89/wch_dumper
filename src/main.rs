@@ -3,7 +3,7 @@
 
 use panic_halt as _;
 use core::{cell::UnsafeCell, mem::MaybeUninit};
-use ch32_hal::usb::EndpointDataBuffer;
+use ch32_hal::usb::EndpointDataBuffer512;
 use ch32_hal::otg_fs::{self, Driver};
 use ch32_hal::{self as hal, bind_interrupts, peripherals, Config};
 use ch32_hal::peripherals::OTG_FS;
@@ -50,14 +50,14 @@ impl<T> StaticCell<MaybeUninit<T>> {
     }
 }
 
-static EP_BUFFERS: StaticCell<MaybeUninit<[EndpointDataBuffer; ENDPOINT_COUNT]>> =
+static EP_BUFFERS: StaticCell<MaybeUninit<[EndpointDataBuffer512; ENDPOINT_COUNT]>> =
     StaticCell(UnsafeCell::new(MaybeUninit::uninit()));
 static CONFIG_DESCRIPTOR        : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static BOS_DESCRIPTOR           : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static MSOS_DESCRIPTOR          : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static CONTROL_BUF              : StaticCell<[u8;  64]> = StaticCell(UnsafeCell::new([0;  64]));
 static DUMPER_BUF               : StaticCell<[u8;  Msg::DATA_CHANNEL_SIZE]> = StaticCell(UnsafeCell::new([0;  Msg::DATA_CHANNEL_SIZE]));
-static DUMPER_CONFIGURATION_BUF : StaticCell<[u8;1024]> = StaticCell(UnsafeCell::new([0;  1024]));
+#[cfg(feature = "nes")] static DUMPER_CONFIGURATION_BUF : StaticCell<[u8;1024]> = StaticCell(UnsafeCell::new([0;  1024]));
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
@@ -69,7 +69,7 @@ async fn main(spawner: Spawner) -> ! {
     let p = hal::init(cfg);
 
     let buffer = unsafe {
-        EP_BUFFERS.init(core::array::from_fn(|_| EndpointDataBuffer::default()))
+        EP_BUFFERS.init(core::array::from_fn(|_| EndpointDataBuffer512::default()))
     };
     let driver = Driver::new(p.OTG_FS, p.PA12, p.PA11, buffer);
 
@@ -88,13 +88,13 @@ async fn main(spawner: Spawner) -> ! {
     config.device_protocol = 0x00;
     config.composite_with_iads = false;
 
-    let mut builder = Builder::new(
+    let mut builder: Builder<'_, Driver<'_, OTG_FS, ENDPOINT_COUNT, 512>> = Builder::new(
         driver,
         config,
         unsafe { &mut *CONFIG_DESCRIPTOR.0.get() },
-        unsafe { &mut *BOS_DESCRIPTOR   .0.get() },
-        unsafe { &mut *MSOS_DESCRIPTOR  .0.get() },
-        unsafe { &mut *CONTROL_BUF      .0.get() },
+        unsafe { &mut *BOS_DESCRIPTOR.0.get() },
+        unsafe { &mut *MSOS_DESCRIPTOR.0.get() },
+        unsafe { &mut *CONTROL_BUF.0.get() },
     );
 
     // The maximum packet size MUST be 8/16/32/64 on full‑speed.
@@ -102,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
     let dumper = DumperClass::new(
         p.PB12,
         p.PE1,
-        p.PB10,
+        #[cfg(any(feature = "snes", feature = "ms",feature = "md"))] p.PB10,
         p.PE0,
         p.PB7,
         p.PE6,
@@ -125,7 +125,7 @@ async fn main(spawner: Spawner) -> ! {
             p.PA10,
             p.PB11,
         ),
-        p.PD6,
+        #[cfg(any(feature = "snes", feature = "ms",feature = "md"))] p.PD6,
         (
             p.PE5,
             p.PD13,
@@ -136,14 +136,14 @@ async fn main(spawner: Spawner) -> ! {
             p.PD10,
             p.PD11,
         ),
-        p.PD5,
-        p.PB2,
-        p.PE7,
-        p.PE9,
-        p.PE8,
-        p.PD12,
-        p.PD14,
-        (
+        #[cfg(any(feature = "snes", feature = "md"))] p.PD5,
+        #[cfg(any(feature = "snes", feature = "ms", feature = "md"))] p.PB2,
+        #[cfg(any(feature = "snes", feature = "ms", feature = "md"))] p.PE7,
+        #[cfg(any(feature = "snes", feature = "ms", feature = "md"))] p.PE9,
+        #[cfg(any(feature = "snes", feature = "ms", feature = "md"))] p.PE8,
+        #[cfg(any(feature = "snes"))] p.PD12,
+        #[cfg(any(feature = "snes", feature = "md"))] p.PD14,
+        #[cfg(any(feature = "snes", feature = "ms", feature = "md"))] (
             p.PD1,
             p.PE2,
             p.PE14,
@@ -152,7 +152,10 @@ async fn main(spawner: Spawner) -> ! {
             p.PE13,
             p.PE10,
         ),
-        p.PE11,
+        #[cfg(any(feature = "snes", feature = "md"))] p.PE11,
+        #[cfg(feature = "md")] p.PC6,
+        #[cfg(feature = "md")] p.PC7,
+        #[cfg(feature = "md")] p.PC8,
         &TO_DUMPER_CHANNEL,
         &TO_USB_CHANNEL,
         unsafe { &mut *DUMPER_BUF.0.get() },
@@ -163,7 +166,7 @@ async fn main(spawner: Spawner) -> ! {
         MAX_PACKET_SIZE,
         &TO_USB_CHANNEL,
         &TO_DUMPER_CHANNEL,
-        unsafe { &mut *DUMPER_CONFIGURATION_BUF.0.get() },
+        #[cfg(feature = "nes")] unsafe { &mut *DUMPER_CONFIGURATION_BUF.0.get() },
     );
 
     // Build the final `UsbDevice` which owns the internal state.
@@ -184,14 +187,14 @@ async fn main(spawner: Spawner) -> ! {
 
 /// Task that drives the USB device state machine.
 #[task]
-async fn usb_device_task(mut device: UsbDevice<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>) {
+async fn usb_device_task(mut device: UsbDevice<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT, 512>>) {
     device.run().await;
 }
 
 /// Very small demo: wait for the host to open the interface and then echo what we
 /// receive back to the host.
 #[task]
-async fn mtp_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT>>) {
+async fn mtp_task(mut mtp: MtpClass<'static, Driver<'static, OTG_FS, ENDPOINT_COUNT, 512>>) {
     // Block until the host has configured the interface.
     mtp.wait_connection().await;
 

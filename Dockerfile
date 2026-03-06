@@ -17,13 +17,13 @@ RUN ./configure --enable-wlinke --disable-ch347 --disable-linuxgpiod --disable-w
 RUN make
 
 FROM base AS dumper_base
-# TODO useful?? 
+# TODO useful??
 RUN apt -y install libudev-dev libusb-1.0-0
 RUN rustup toolchain install nightly
 RUN rustup default nightly
 RUN rustup component add rust-src
 RUN rustup update
-RUN rustup target add riscv32imafc-unknown-none-elf
+RUN rustup target add riscv32imc-unknown-none-elf
 RUN mkdir -p /opt/ch32-data/build/
 RUN git clone https://github.com/ch32-rs/ch32-hal /opt/ch32-data/build/ch32-hal
 
