@@ -33,23 +33,23 @@ enum MtpCommandError {
     Ok = 0x2001,
     // SessionNotOpen = 0x2003,
     // InvalidTransactionId = 0x2004,
-    OperationNotSupported = 0x2005,
+    #[cfg(feature = "nes")] OperationNotSupported = 0x2005,
     // ParameterNotSupported = 0x2006,
     // InvalidStorageId = 0x2008,
-    InvalidObjectFormatCode = 0x200B,
+    #[cfg(feature = "nes")] InvalidObjectFormatCode = 0x200B,
     // StoreFull = 0x200C,
     // StoreReadOnly = 0x200E,
     // AccessDenied = 0x200F,
     StoreNotAvailable = 0x2013,
-    InvalidParentObject = 0x201A,
-    ObjectTooLarge = 0xA809,
+    #[cfg(feature = "nes")] InvalidParentObject = 0x201A,
+    #[cfg(feature = "nes")] ObjectTooLarge = 0xA809,
 }
 
 #[repr(u16)]
 pub enum MtpContainerType {
     // Undefined = 0x0000,
     Command = 0x0001,
-    Data = 0x0002,
+    #[cfg(feature = "nes")] Data = 0x0002,
     Response = 0x0003,
     // Event = 0x0004,
 }
@@ -81,9 +81,9 @@ pub struct MtpClass<'d, D: Driver<'d>> {
     write_ep: D::EndpointIn,
     in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
     out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-    configuration_file: &'d mut [u8],
-    configuration_file_size: usize,
-    configuration_file_deleted: bool,
+    #[cfg(feature = "nes")] configuration_file: &'d mut [u8],
+    #[cfg(feature = "nes")] configuration_file_size: usize,
+    #[cfg(feature = "nes")] configuration_file_deleted: bool,
 }
 
 impl<'d, D: Driver<'d>> MtpClass<'d, D> {
@@ -93,7 +93,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
         max_packet_size: u16,
         in_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
         out_channel: &'d Channel<CriticalSectionRawMutex, Msg, 1>,
-        configuration_file: &'d mut [u8]) -> Self {
+        #[cfg(feature = "nes")] configuration_file: &'d mut [u8]) -> Self {
         assert!(builder.control_buf_len() >= 7);
 
         let mut func = builder.function(0x00, 0x00, 0x00);
@@ -105,7 +105,7 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
 
         drop(func);
 
-        let config = DumperConfig {
+        #[cfg(feature = "nes")] let config = DumperConfig {
             mapper: 1,
             prgsize: 3,
             chrsize: 0,
@@ -113,16 +113,16 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
             chr: 0
         };
 
-        let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
+        #[cfg(feature = "nes")] let configuration_file_size = serde_json_core::to_slice(&config, configuration_file).unwrap();
         MtpClass {
             //_comm_ep: comm_ep,
             read_ep,
             write_ep,
             in_channel,
             out_channel,
-            configuration_file,
-            configuration_file_size,
-            configuration_file_deleted: false,
+            #[cfg(feature = "nes")] configuration_file,
+            #[cfg(feature = "nes")] configuration_file_size,
+            #[cfg(feature = "nes")] configuration_file_deleted: false,
         }
     }
 
@@ -759,6 +759,8 @@ impl<'d, D: Driver<'d>> MtpClass<'d, D> {
                     Ok(cmd) => {
                         let command_result = match cmd.op_code {
                             0x100c => {
+                                use core::iter;
+
                                 let object_format = u16::from_le_bytes(cmd.payload[4..6].try_into().unwrap());
                                 let object_compressed_size = u32::from_le_bytes(cmd.payload[8..12].try_into().unwrap());
                                 let parent_object=u32::from_le_bytes(cmd.payload[38..42].try_into().unwrap());

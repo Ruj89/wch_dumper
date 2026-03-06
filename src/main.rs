@@ -57,7 +57,7 @@ static BOS_DESCRIPTOR           : StaticCell<[u8; 256]> = StaticCell(UnsafeCell:
 static MSOS_DESCRIPTOR          : StaticCell<[u8; 256]> = StaticCell(UnsafeCell::new([0; 256]));
 static CONTROL_BUF              : StaticCell<[u8;  64]> = StaticCell(UnsafeCell::new([0;  64]));
 static DUMPER_BUF               : StaticCell<[u8;  Msg::DATA_CHANNEL_SIZE]> = StaticCell(UnsafeCell::new([0;  Msg::DATA_CHANNEL_SIZE]));
-static DUMPER_CONFIGURATION_BUF : StaticCell<[u8;1024]> = StaticCell(UnsafeCell::new([0;  1024]));
+#[cfg(feature = "nes")] static DUMPER_CONFIGURATION_BUF : StaticCell<[u8;1024]> = StaticCell(UnsafeCell::new([0;  1024]));
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
@@ -166,7 +166,7 @@ async fn main(spawner: Spawner) -> ! {
         MAX_PACKET_SIZE,
         &TO_USB_CHANNEL,
         &TO_DUMPER_CHANNEL,
-        unsafe { &mut *DUMPER_CONFIGURATION_BUF.0.get() },
+        #[cfg(feature = "nes")] unsafe { &mut *DUMPER_CONFIGURATION_BUF.0.get() },
     );
 
     // Build the final `UsbDevice` which owns the internal state.

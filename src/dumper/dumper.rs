@@ -1217,6 +1217,7 @@ impl<'d> DumperClass<'d>
             self.a[a_index].set_level(Level::from((address & (1 << (index + a_index))) > 0));
         }
         Timer::after_nanos(63).await;
+
         self.cs.set_low();
         self.rd.set_low();
         self.asout.set_low();
@@ -1225,7 +1226,7 @@ impl<'d> DumperClass<'d>
 
         Timer::after_nanos(375).await;
 
-        let mut temp_word = 0; // = ((PINA & 0xFF) << 8) | (PINC & 0xFF); = 0;
+        let mut temp_word = 0;
         for (index, pin) in self.a[8..15].iter().enumerate() {
             temp_word |= (pin.is_high() as u16) << (index + 8);
         }
@@ -1241,6 +1242,8 @@ impl<'d> DumperClass<'d>
         self.asout.set_high();
         self.expand.set_high();
         self.pulse_clock(10);
+
+        Timer::after_nanos(375).await;
 
         return temp_word;
     }
@@ -1553,14 +1556,14 @@ impl<'d> DumperClass<'d>
             0x9A5C | 0xC4EE => Ok(0x2005),
             0x7E50 => Ok(0x805),
             0x165E => {
-                if self.read_word_md(0x00).await != 0x444E {
+                if self.read_word_md(0x00).await == 0x444E {
                     Ok(0x805)
                 } else {
                     Err("not found")
                 }
             },
             0x168B => {
-                if self.read_word_md(0x00).await != 0x444E {
+                if self.read_word_md(0x00).await == 0x444E {
                     Ok(0x405)
                 } else {
                     Err("not found")
@@ -1685,20 +1688,21 @@ impl<'d> DumperClass<'d>
         }
 
         if cart_size < 0x8000 || cart_size > 0xEAF400 {
-            for cart_size in (0x20000 / 2 .. 0x400000 / 2).step_by(0x20000 / 2) {
-                if self.read_word_md(0x0).await == self.read_word_md(cart_size as u32).await &&
-                    (self.read_word_md(0x1).await == self.read_word_md(0x1 + cart_size).await) &&
-                    (self.read_word_md(0x2).await == self.read_word_md(0x2 + cart_size).await) &&
-                    (self.read_word_md(0x3).await == self.read_word_md(0x3 + cart_size).await) &&
-                    (self.read_word_md(0x4).await == self.read_word_md(0x4 + cart_size).await) &&
-                    (self.read_word_md(0x5).await == self.read_word_md(0x5 + cart_size).await) &&
-                    (self.read_word_md(0x6).await == self.read_word_md(0x6 + cart_size).await) &&
-                    (self.read_word_md(0x7).await == self.read_word_md(0x7 + cart_size).await) &&
-                    (self.read_word_md(0x8).await == self.read_word_md(0x8 + cart_size).await) {
+            for temp_cart_size in (0x20000 / 2 .. 0x400000 / 2).step_by(0x20000 / 2) {
+                if self.read_word_md(0x0).await == self.read_word_md(temp_cart_size as u32).await &&
+                    self.read_word_md(0x1).await == self.read_word_md(0x1 + temp_cart_size).await &&
+                    self.read_word_md(0x2).await == self.read_word_md(0x2 + temp_cart_size).await &&
+                    self.read_word_md(0x3).await == self.read_word_md(0x3 + temp_cart_size).await &&
+                    self.read_word_md(0x4).await == self.read_word_md(0x4 + temp_cart_size).await &&
+                    self.read_word_md(0x5).await == self.read_word_md(0x5 + temp_cart_size).await &&
+                    self.read_word_md(0x6).await == self.read_word_md(0x6 + temp_cart_size).await &&
+                    self.read_word_md(0x7).await == self.read_word_md(0x7 + temp_cart_size).await &&
+                    self.read_word_md(0x8).await == self.read_word_md(0x8 + temp_cart_size).await {
+                    cart_size = temp_cart_size;
                     break;
                 }
             }
-            cart_size = cart_size * 2;
+            cart_size *= 2
         }
 
         (cart_size, realtec, is_svp, snk_mode, cart_size_lockon)
@@ -1707,9 +1711,13 @@ impl<'d> DumperClass<'d>
     #[cfg(feature = "md")]
     async fn setup_md(&mut self) -> (u32, bool, bool, u8, u32) {
         self.ciram_ce.set_as_output(Default::default());
+        self.a[15].set_as_output(Default::default());
         self.irq.set_as_output(Default::default());
         for pin in self.d.iter_mut() {
             pin.set_as_output(Default::default());
+        }
+        for a_index in 0..8 {
+            self.a[a_index].set_as_output(Default::default());
         }
 
         self.irq_snes.set_as_output(Default::default());
@@ -1731,8 +1739,8 @@ impl<'d> DumperClass<'d>
         self.wr.set_high();
         self.rd.set_high();
 
-        self.asout.set_high();
         self.time.set_high();
+        self.asout.set_high();
 
         self.expand.set_high();
 
